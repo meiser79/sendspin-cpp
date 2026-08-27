@@ -25,6 +25,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <vector>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +48,10 @@ class MetadataRole;
 #endif
 #ifdef SENDSPIN_ENABLE_PLAYER
 class PlayerRole;
+#endif
+#ifdef SENDSPIN_ENABLE_SOURCE
+class SourceRole;
+struct SourceRoleConfig;
 #endif
 #ifdef SENDSPIN_ENABLE_VISUALIZER
 class VisualizerRole;
@@ -233,6 +239,11 @@ public:
     PlayerRole& add_player(PlayerRoleConfig config);
 #endif
 
+#ifdef SENDSPIN_ENABLE_SOURCE
+    /// @brief Adds the source@v1 capture role.
+    SourceRole& add_source(SourceRoleConfig config);
+#endif
+
 #ifdef SENDSPIN_ENABLE_COLOR
     /// @brief Adds the color role. Returns a reference for setting callbacks
     ColorRole& add_color();
@@ -322,6 +333,10 @@ public:
         return this->player_.get();
     }
 #endif
+#ifdef SENDSPIN_ENABLE_SOURCE
+    SourceRole* source() { return this->source_.get(); }
+    const SourceRole* source() const { return this->source_.get(); }
+#endif
 #ifdef SENDSPIN_ENABLE_VISUALIZER
     /// @brief Returns the visualizer role, or nullptr if not added
     /// @return Pointer to the visualizer role, or nullptr
@@ -355,6 +370,10 @@ public:
     /// @param server_time Server-side timestamp in microseconds
     /// @return Equivalent client-side timestamp in microseconds
     int64_t get_client_time(int64_t server_time) const;
+    /// Converts a local client timestamp to synchronized server time (source@v1 timestamps).
+    int64_t get_server_time(int64_t client_time) const;
+    /// Returns whether a versioned role is active on the current connection.
+    bool is_role_active(const std::string& role) const;
 
     /// @brief Returns the current group state
     /// @return The current GroupUpdateObject (fields are optional and may be unset)
@@ -400,6 +419,10 @@ public:
     /// @brief Sends a text message over the active connection
     /// @param text The text message to send
     void send_text(const std::string& text);
+    /// @brief Sends one binary WebSocket message over the active connection.
+    bool send_binary(const uint8_t* data, size_t len);
+    /// Update active roles from server/activate. Role implementations query this state.
+    void update_active_roles(std::vector<std::string> roles);
 
     /// @brief Acquires a ref-counted high-performance networking request
     void acquire_high_performance();
@@ -488,8 +511,14 @@ private:
 #endif
     SendspinNetworkProvider* network_provider_{nullptr};
     SendspinPersistenceProvider* persistence_provider_{nullptr};
+    mutable std::mutex active_roles_mutex_;
+    std::vector<std::string> active_roles_;
+    bool received_initial_activation_{false};
 #ifdef SENDSPIN_ENABLE_PLAYER
     std::unique_ptr<PlayerRole> player_;
+#endif
+#ifdef SENDSPIN_ENABLE_SOURCE
+    std::unique_ptr<SourceRole> source_;
 #endif
     std::unique_ptr<SendspinTimeBurst> time_burst_;
 #ifdef SENDSPIN_ENABLE_VISUALIZER

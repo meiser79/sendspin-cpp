@@ -151,6 +151,10 @@ public:
     /// @return SsErr::OK if queued successfully, error code otherwise.
     virtual SsErr send_text_message(const std::string& message, SendCompleteCallback cb,
                                     bool allow_before_hello = false) = 0;
+    /// Send one WebSocket binary message. Host transports override this when source@v1 is enabled.
+    virtual SsErr send_binary_message(const uint8_t* data, size_t len) {
+        (void)data; (void)len; return SsErr::FAIL;
+    }
 
     /// @brief Sends a client/time synchronization message
     ///
@@ -230,6 +234,13 @@ public:
             return 0;
         }
         return this->time_filter_->compute_client_time(server_time);
+    }
+    /// @brief Converts a client timestamp to the synchronized server clock domain.
+    int64_t get_server_time(int64_t client_time) const {
+        if (this->time_filter_ == nullptr) {
+            return 0;
+        }
+        return this->time_filter_->compute_server_time(client_time);
     }
 
     /// @brief Gets the time filter for this connection

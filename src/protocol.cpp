@@ -292,6 +292,9 @@ SendspinServerToClientMessageType determine_message_type(JsonObject root) {
     if (type_str == "server/hello") {
         return SendspinServerToClientMessageType::SERVER_HELLO;
     }
+    if (type_str == "server/activate") {
+        return SendspinServerToClientMessageType::SERVER_ACTIVATE;
+    }
     if (type_str == "server/time") {
         return SendspinServerToClientMessageType::SERVER_TIME;
     }
@@ -839,6 +842,14 @@ std::string format_client_hello_message(const ClientHelloMessage* msg) {
         supported_roles_list.add(to_cstr(role));
     }
 
+    if (msg->source_v1_support.has_value()) {
+        const auto& source = msg->source_v1_support.value();
+        if (source.line_sense) {
+            root["payload"]["source@v1_support"]["features"]["line_sense"] = true;
+        } else {
+            root["payload"]["source@v1_support"].to<JsonObject>();
+        }
+    }
     if (msg->player_v1_support.has_value()) {
         JsonArray formats_list =
             root["payload"]["player@v1_support"]["supported_formats"].to<JsonArray>();
@@ -895,6 +906,12 @@ std::string format_client_state_message(const ClientStateMessage* msg) {
     root["type"] = "client/state";
     root["payload"]["state"] = to_cstr(msg->state);
 
+    if (msg->source.has_value()) {
+        const auto& source_state = msg->source.value();
+        if (source_state.signal.has_value()) {
+            root["payload"]["source"]["signal"] = source_state.signal.value();
+        }
+    }
     if (msg->player.has_value()) {
         const ClientPlayerStateObject& player_state = msg->player.value();
         root["payload"]["player"]["volume"] = player_state.volume;

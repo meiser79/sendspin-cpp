@@ -37,12 +37,16 @@
 #ifdef SENDSPIN_ENABLE_PLAYER
 #include "player_role_impl.h"
 #endif
+#ifdef SENDSPIN_ENABLE_SOURCE
+#include "source_role_impl.h"
+#endif
 #include "protocol_messages.h"
 #ifdef SENDSPIN_ENABLE_VISUALIZER
 #include "visualizer_role_impl.h"
 #endif
 #include "time_burst.h"
 #include <ArduinoJson.h>
+#include <algorithm>
 
 static const char* const TAG = "sendspin.client";
 
@@ -83,6 +87,9 @@ SendspinClient::~SendspinClient() {
     // (not just the threaded ones): role InboxSlots release their topic-bit claims against
     // event_state_'s Inbox on destruction, so all roles must be gone before the alphabetized
     // member order destroys event_state_.
+#ifdef SENDSPIN_ENABLE_SOURCE
+    this->source_.reset();
+#endif
 #ifdef SENDSPIN_ENABLE_PLAYER
     this->player_.reset();
 #endif
@@ -406,6 +413,16 @@ PlayerRole& SendspinClient::add_player(PlayerRoleConfig config) {
 }
 #endif
 
+#ifdef SENDSPIN_ENABLE_SOURCE
+SourceRole& SendspinClient::add_source(SourceRoleConfig config) {
+    if (this->started_) {
+        SS_LOGW(TAG, "add_source() called after start_server(); role may not initialize correctly");
+    }
+    this->source_ = std::make_unique<SourceRole>(std::move(config), this);
+    return *this->source_;
+}
+#endif
+
 #ifdef SENDSPIN_ENABLE_CONTROLLER
 ControllerRole& SendspinClient::add_controller() {
     if (this->started_) {
@@ -477,9 +494,12 @@ bool SendspinClient::is_time_synced() const {
 }
 
 int64_t SendspinClient::get_client_time(int64_t server_time) const {
-    // current_shared(): called from role threads; see is_time_synced().
     auto conn = this->connection_manager_->current_shared();
     return conn != nullptr ? conn->get_client_time(server_time) : 0;
+}
+int64_t SendspinClient::get_server_time(int64_t client_time) const {
+    auto conn = this->connection_manager_->current_shared();
+    return conn != nullptr ? conn->get_server_time(client_time) : 0;
 }
 
 std::optional<ServerInformationObject> SendspinClient::get_server_information() const {
@@ -510,9 +530,31 @@ void SendspinClient::publish_state() {
 
 void SendspinClient::send_text(const std::string& text) {
     auto* conn = this->connection_manager_->current();
-    if (conn != nullptr && conn->is_connected()) {
-        conn->send_text_message(text, nullptr);
+    if (conn != nullptr && conn->is_connected()) conn->send_text_message(text, nullptr);
+}
+bool SendspinClient::send_binary(const uint8_t* data, size_t len) {
+    auto conn = this->connection_manager_->current_shared();
+    return conn != nullptr && conn->is_connected() &&
+           conn->send_binary_message(data, len) == SsErr::OK;
+}
+bool SendspinClient::is_role_active(const std::string& role) const {
+    std::lock_guard<std::mutex> lock(this->active_roles_mutex_);
+    return std::find(this->active_roles_.begin(), this->active_roles_.end(), role) != this->active_roles_.end();
+}
+void SendspinClient::update_active_roles(std::vector<std::string> roles) {
+    bool source_was_active = false;
+    bool source_is_active = false;
+    {
+        std::lock_guard<std::mutex> lock(this->active_roles_mutex_);
+        source_was_active = std::find(this->active_roles_.begin(), this->active_roles_.end(), "source@v1") != this->active_roles_.end();
+        source_is_active = std::find(roles.begin(), roles.end(), "source@v1") != roles.end();
+        this->active_roles_ = std::move(roles);
     }
+#ifdef SENDSPIN_ENABLE_SOURCE
+    // Dispatch outside the mutex: stopping capture may call application callbacks.
+    if (this->source_ && source_was_active != source_is_active)
+        this->source_->impl_->handle_activation(source_is_active);
+#endif
 }
 
 void SendspinClient::acquire_high_performance() {
@@ -564,6 +606,11 @@ void SendspinClient::cleanup_connection_state() {
     if (this->player_) {
         this->player_->impl_->cleanup();
     }
+#endif
+    this->update_active_roles({});
+    this->received_initial_activation_ = false;
+#ifdef SENDSPIN_ENABLE_SOURCE
+    if (this->source_) this->source_->impl_->cleanup();
 #endif
 #ifdef SENDSPIN_ENABLE_CONTROLLER
     if (this->controller_) {
@@ -629,6 +676,9 @@ std::string SendspinClient::build_hello_message() {
     if (this->player_) {
         this->player_->impl_->build_hello_fields(msg);
     }
+#endif
+#ifdef SENDSPIN_ENABLE_SOURCE
+    if (this->source_) this->source_->impl_->build_hello_fields(msg);
 #endif
 #ifdef SENDSPIN_ENABLE_CONTROLLER
     if (this->controller_) {
@@ -807,6 +857,11 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
                         hello_msg.server.name.c_str(), hello_msg.server.server_id.c_str(),
                         to_cstr(hello_msg.connection_reason));
 
+                // Legacy/current sendspin-cpp protocol revisions carry active_roles in
+                // server/hello. Keep that path working while also accepting server/activate
+                // below for newer protocol revisions.
+                this->update_active_roles(hello_msg.active_roles);
+
                 if (conn != nullptr) {
                     conn->set_server_information(std::move(hello_msg.server));
                     conn->set_connection_reason(hello_msg.connection_reason);
@@ -871,7 +926,30 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
 #endif
             break;
         }
+        case SendspinServerToClientMessageType::SERVER_ACTIVATE: {
+            const JsonVariantConst active = root["payload"]["active_roles"];
+            if (active.is<JsonArrayConst>()) {
+                std::vector<std::string> roles;
+                for (JsonVariantConst value : active.as<JsonArrayConst>()) {
+                    if (value.is<const char*>()) roles.push_back(value.as<std::string>());
+                }
+                this->update_active_roles(std::move(roles));
+                this->received_initial_activation_ = true;
+            } else if (!this->received_initial_activation_) {
+                // The first activation that omits active_roles means an empty set.
+                this->update_active_roles({});
+                this->received_initial_activation_ = true;
+            }
+            // Later omissions preserve the previous active_roles set.
+            break;
+        }
         case SendspinServerToClientMessageType::SERVER_COMMAND: {
+#ifdef SENDSPIN_ENABLE_SOURCE
+            if (this->source_ && root["payload"]["source"]["command"].is<const char*>()) {
+                this->source_->impl_->handle_server_command(
+                    root["payload"]["source"]["command"].as<std::string>());
+            }
+#endif
 #ifdef SENDSPIN_ENABLE_PLAYER
             if (this->player_) {
                 ServerCommandMessage cmd_msg;
@@ -965,9 +1043,10 @@ void SendspinClient::publish_client_state(SendspinConnection* conn) {
     state_msg.state = this->state_;
 
 #ifdef SENDSPIN_ENABLE_PLAYER
-    if (this->player_) {
-        this->player_->impl_->build_state_fields(state_msg);
-    }
+    if (this->player_) this->player_->impl_->build_state_fields(state_msg);
+#endif
+#ifdef SENDSPIN_ENABLE_SOURCE
+    if (this->source_) this->source_->impl_->build_state_fields(state_msg);
 #endif
 
     std::string state_message = format_client_state_message(&state_msg);

@@ -63,6 +63,11 @@ bool SendspinServerConnection::is_connected() const {
     return this->ws_ && this->ws_->getReadyState() == ix::ReadyState::Open;
 }
 
+SsErr SendspinServerConnection::send_binary_message(const uint8_t* data, size_t len) {
+    if (!this->is_connected() || data == nullptr || len == 0) return SsErr::INVALID_STATE;
+    const auto info = this->ws_->sendBinary(std::string(reinterpret_cast<const char*>(data), len));
+    return info.success ? SsErr::OK : SsErr::FAIL;
+}
 SsErr SendspinServerConnection::send_text_message(const std::string& message,
                                                   SendCompleteCallback on_complete,
                                                   bool /*allow_before_hello*/) {

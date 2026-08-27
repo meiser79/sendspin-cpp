@@ -36,6 +36,11 @@ function(sendspin_get_sources BASE_DIR)
         PARENT_SCOPE
     )
 
+    set(SENDSPIN_SOURCE_SOURCES
+        ${BASE_DIR}/src/source_role.cpp
+        PARENT_SCOPE
+    )
+
     set(SENDSPIN_CONTROLLER_SOURCES
         ${BASE_DIR}/src/controller_role.cpp
 

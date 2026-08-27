@@ -23,6 +23,9 @@
 #include "sendspin/controller_role.h"
 #include "sendspin/metadata_role.h"
 #include "sendspin/player_role.h"
+#ifdef SENDSPIN_ENABLE_SOURCE
+#include "sendspin/source_role.h"
+#endif
 #include "sendspin/types.h"
 #include "sendspin/visualizer_role.h"
 #include <ArduinoJson.h>
@@ -87,6 +90,7 @@ enum SendspinBinaryType : uint8_t {
 /// @brief JSON message types sent from the server to the client
 enum class SendspinServerToClientMessageType : uint8_t {
     SERVER_HELLO,    // server/hello handshake
+    SERVER_ACTIVATE, // server/activate role/activity lifecycle
     SERVER_TIME,     // server/time clock sync reply
     SERVER_STATE,    // server/state playback state update
     SERVER_COMMAND,  // server/command player command
@@ -100,6 +104,7 @@ enum class SendspinServerToClientMessageType : uint8_t {
 /// @brief Protocol role identifiers used in hello messages and role negotiation
 enum class SendspinRole : uint8_t {
     PLAYER,      // Audio playback role
+    SOURCE,      // Local audio capture role
     CONTROLLER,  // Playback command/state role
     METADATA,    // Track metadata role
     ARTWORK,     // Album artwork role
@@ -114,6 +119,8 @@ inline const char* to_cstr(SendspinRole role) {
     switch (role) {
         case SendspinRole::PLAYER:
             return "player@v1";
+        case SendspinRole::SOURCE:
+            return "source@v1";
         case SendspinRole::CONTROLLER:
             return "controller@v1";
         case SendspinRole::METADATA:
@@ -605,6 +612,14 @@ struct ServerColorStateDelta {
     std::optional<std::optional<RgbColor>> on_light;
 };
 
+// --- source_role.h ---
+struct SourceSupportObject {
+    bool line_sense{false};
+};
+struct ClientSourceStateObject {
+    std::optional<std::string> signal{};
+};
+
 // ============================================================================
 // Message envelope structs
 // ============================================================================
@@ -617,6 +632,7 @@ struct ClientHelloMessage {
     uint8_t version{};
     std::vector<SendspinRole> supported_roles{};
     std::optional<PlayerSupportObject> player_v1_support{};
+    std::optional<SourceSupportObject> source_v1_support{};
     std::optional<ArtworkSupportObject> artwork_v1_support{};
     std::optional<VisualizerSupportObject> visualizer_support{};
 };
@@ -625,6 +641,7 @@ struct ClientHelloMessage {
 struct ClientStateMessage {
     SendspinClientState state{};
     std::optional<ClientPlayerStateObject> player{};
+    std::optional<ClientSourceStateObject> source{};
 };
 
 /// @brief Parsed server/hello handshake message received at connection startup
