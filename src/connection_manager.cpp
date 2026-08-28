@@ -115,6 +115,12 @@ ConnectionManager::~ConnectionManager() {
 // ============================================================================
 
 void ConnectionManager::connect_to(const std::string& url) {
+#ifndef ESP_PLATFORM
+    if (this->client_->config_.enable_security) {
+        SS_LOGE(TAG, "Noise security is currently implemented for server-initiated/inbound host connections only");
+        return;
+    }
+#endif
     SS_LOGI(TAG, "Initiating client connection to: %s", url.c_str());
 
     auto client_conn = std::make_shared<SendspinClientConnection>(url);
@@ -530,6 +536,12 @@ void ConnectionManager::on_new_connection(std::shared_ptr<SendspinServerConnecti
     // the conn out from under in-flight workers.
     conn->init_time_filter();
     conn->set_websocket_payload_location(this->client_->config_.websocket_payload_location);
+#ifndef ESP_PLATFORM
+    if (this->client_->config_.enable_security) {
+        conn->configure_security(this->client_->security_state_.get(),
+                                 this->client_->config_.unpaired_access);
+    }
+#endif
 
     this->setup_connection_callbacks(conn.get());
     conn->on_disconnected_cb = [](SendspinConnection* /*c*/) {
@@ -629,7 +641,21 @@ bool ConnectionManager::send_hello_message(uint8_t remaining_attempts, SendspinC
         return true;
     }
 
-    std::string hello_message = this->client_->build_hello_message();
+#ifndef ESP_PLATFORM
+    if (this->client_->config_.enable_security && conn->security_enabled()) {
+        if (conn->security_established()) {
+            // Secure client/hello is sent only after encrypted server/hello arrives.
+            return true;
+        }
+        if (!conn->begin_security_handshake()) {
+            SS_LOGW(TAG, "Failed to begin Noise handshake");
+            return false;
+        }
+        return true;
+    }
+#endif
+
+    std::string hello_message = this->client_->build_hello_message(conn);
 
     SsErr err = conn->send_text_message(
         hello_message,

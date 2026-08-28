@@ -23,12 +23,17 @@
 #include "protocol_messages.h"
 #include "time_filter.h"
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
 
 namespace sendspin {
+
+#ifndef ESP_PLATFORM
+class SendspinSecurityState;
+#endif
 
 /// @brief Callback type for message send completion
 /// @param success True if the message was sent successfully, false otherwise.
@@ -155,6 +160,22 @@ public:
     virtual SsErr send_binary_message(const uint8_t* data, size_t len) {
         (void)data; (void)len; return SsErr::FAIL;
     }
+
+#ifndef ESP_PLATFORM
+    /// Configure the host connection for the current Noise-encrypted Sendspin protocol.
+    virtual void configure_security(SendspinSecurityState* /*state*/, bool /*unpaired_access*/) {}
+    /// Begin the cleartext client/init -> server/init -> Noise handshake.
+    virtual bool begin_security_handshake() { return false; }
+    virtual bool security_enabled() const { return false; }
+    virtual bool security_established() const { return false; }
+    virtual const char* trust_level() const { return "none"; }
+    virtual bool matched_pairing_psk() const { return false; }
+    virtual const std::string& security_server_id() const {
+        static const std::string empty; return empty;
+    }
+    virtual bool set_pending_pairing_psk(const std::array<uint8_t, 32>& /*psk*/) { return false; }
+    virtual bool commit_pending_pairing_psk() { return false; }
+#endif
 
     /// @brief Sends a client/time synchronization message
     ///

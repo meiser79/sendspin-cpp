@@ -90,6 +90,12 @@ public:
     virtual bool is_network_ready() = 0;
 };
 
+/// @brief Persisted long-term Sendspin PSK record.
+struct SendspinPersistedPairingRecord {
+    std::string server_id;
+    std::string psk;  ///< 32-byte PSK, base64url without padding
+};
+
 /// @brief Optional persistence provider for saving/loading client and role state
 /// All methods fire on the main loop thread
 class SendspinPersistenceProvider {
@@ -121,6 +127,20 @@ public:
     virtual std::optional<uint16_t> load_static_delay() {
         return std::nullopt;
     }
+
+    /// Persistent X25519 private key used by the Noise transport, base64url encoded.
+    virtual bool save_security_private_key(const std::string& /*key*/) { return false; }
+    virtual std::optional<std::string> load_security_private_key() { return std::nullopt; }
+
+    /// Persistent per-device Pairing PSK, base64url encoded.
+    virtual bool save_pairing_psk(const std::string& /*psk*/) { return false; }
+    virtual std::optional<std::string> load_pairing_psk() { return std::nullopt; }
+
+    /// Long-term per-server pairing records.
+    virtual std::vector<SendspinPersistedPairingRecord> load_pairing_records() { return {}; }
+    virtual bool save_pairing_record(const std::string& /*server_id*/, const std::string& /*psk*/) {
+        return false;
+    }
 };
 
 /// @brief Log severity levels for host builds
@@ -139,6 +159,9 @@ class ConnectionManager;
 class SendspinArenaAllocator;
 class SendspinConnection;
 class SendspinTimeBurst;
+#ifndef ESP_PLATFORM
+class SendspinSecurityState;
+#endif
 
 /**
  * @brief Main orchestration class for the sendspin-cpp library
@@ -374,6 +397,10 @@ public:
     int64_t get_server_time(int64_t client_time) const;
     /// Returns whether a versioned role is active on the current connection.
     bool is_role_active(const std::string& role) const;
+#ifndef ESP_PLATFORM
+    /// Pairing-PSK token (SP:0...) for entering this client in a Sendspin server.
+    std::string get_pairing_token() const;
+#endif
 
     /// @brief Returns the current group state
     /// @return The current GroupUpdateObject (fields are optional and may be unset)
@@ -435,7 +462,7 @@ private:
     void cleanup_connection_state();
 
     /// @brief Builds the formatted client hello message from config
-    std::string build_hello_message();
+    std::string build_hello_message(SendspinConnection* conn = nullptr);
 
     // ========================================
     // Message processing
@@ -511,9 +538,16 @@ private:
 #endif
     SendspinNetworkProvider* network_provider_{nullptr};
     SendspinPersistenceProvider* persistence_provider_{nullptr};
+#ifndef ESP_PLATFORM
+    std::unique_ptr<SendspinSecurityState> security_state_;
+#endif
     mutable std::mutex active_roles_mutex_;
     std::vector<std::string> active_roles_;
     bool received_initial_activation_{false};
+#ifndef ESP_PLATFORM
+    bool management_activity_active_{false};
+    bool secure_time_ready_{false};
+#endif
 #ifdef SENDSPIN_ENABLE_PLAYER
     std::unique_ptr<PlayerRole> player_;
 #endif

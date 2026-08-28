@@ -17,6 +17,9 @@ function(sendspin_get_sources BASE_DIR)
         # Connection base class
         ${BASE_DIR}/src/connection.cpp
 
+        # Host security (empty translation unit on ESP)
+        ${BASE_DIR}/src/security.cpp
+
         # Connection management
         ${BASE_DIR}/src/connection_manager.cpp
 

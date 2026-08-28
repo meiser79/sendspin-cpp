@@ -40,6 +40,8 @@ enum class SendspinGoodbyeReason : uint8_t {
     SHUTDOWN,        // Client is shutting down
     RESTART,         // Client is restarting
     USER_REQUEST,    // User explicitly requested disconnect
+    UNAUTHORIZED,    // Server requested an operation not allowed by the current trust/PSK
+    PAIRING_REQUIRED, // Operation requires pairing while unpaired access is disabled
 };
 
 /// @brief Server identity fields received in server/hello messages

@@ -96,6 +96,10 @@ function(sendspin_configure_host TARGET_LIB SOURCE_DIR)
     find_package(Threads REQUIRED)
     target_link_libraries(${TARGET_LIB} PRIVATE Threads::Threads)
 
+    # OpenSSL provides X25519, ChaCha20-Poly1305, SHA-256/HMAC, and CSPRNG for Noise.
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(${TARGET_LIB} PRIVATE OpenSSL::Crypto)
+
     # =========================================================================
     # clang-tidy integration (opt-in via -DENABLE_CLANG_TIDY=ON)
     # Set only on this target so _deps are never analyzed.

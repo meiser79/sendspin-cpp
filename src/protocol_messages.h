@@ -91,6 +91,7 @@ enum SendspinBinaryType : uint8_t {
 enum class SendspinServerToClientMessageType : uint8_t {
     SERVER_HELLO,    // server/hello handshake
     SERVER_ACTIVATE, // server/activate role/activity lifecycle
+    SERVER_PAIR_FINALIZE, // server/pair-finalize pairing acknowledgement
     SERVER_TIME,     // server/time clock sync reply
     SERVER_STATE,    // server/state playback state update
     SERVER_COMMAND,  // server/command player command
@@ -98,6 +99,7 @@ enum class SendspinServerToClientMessageType : uint8_t {
     STREAM_END,      // stream/end normal stream completion
     STREAM_CLEAR,    // stream/clear immediate buffer flush
     GROUP_UPDATE,    // group/update group membership change
+    MANAGEMENT_GET_PAIRING_CONFIG, // management/get-pairing-config
     UNKNOWN,         // Unrecognized message type
 };
 
@@ -199,6 +201,10 @@ inline const char* to_cstr(SendspinGoodbyeReason reason) {
             return "restart";
         case SendspinGoodbyeReason::USER_REQUEST:
             return "user_request";
+        case SendspinGoodbyeReason::UNAUTHORIZED:
+            return "unauthorized";
+        case SendspinGoodbyeReason::PAIRING_REQUIRED:
+            return "pairing_required";
         default:
             return "shutdown";
     }
@@ -630,6 +636,10 @@ struct ClientHelloMessage {
     std::string name{};
     std::optional<DeviceInfoObject> device_info{};
     uint8_t version{};
+    bool modern_security{false};
+    std::string trust_level{"none"};
+    bool supports_pairing_psk{false};
+    bool unpaired_access{true};
     std::vector<SendspinRole> supported_roles{};
     std::optional<PlayerSupportObject> player_v1_support{};
     std::optional<SourceSupportObject> source_v1_support{};
@@ -640,6 +650,10 @@ struct ClientHelloMessage {
 /// @brief Outgoing client/state message reporting client playback state to the server
 struct ClientStateMessage {
     SendspinClientState state{};
+#ifndef ESP_PLATFORM
+    bool modern_security{false};
+    bool available{false};
+#endif
     std::optional<ClientPlayerStateObject> player{};
     std::optional<ClientSourceStateObject> source{};
 };

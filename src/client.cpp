@@ -41,12 +41,18 @@
 #include "source_role_impl.h"
 #endif
 #include "protocol_messages.h"
+#ifndef ESP_PLATFORM
+#include "security.h"
+#endif
 #ifdef SENDSPIN_ENABLE_VISUALIZER
 #include "visualizer_role_impl.h"
 #endif
 #include "time_burst.h"
 #include <ArduinoJson.h>
 #include <algorithm>
+#include <array>
+#include <cinttypes>
+#include <cstring>
 
 static const char* const TAG = "sendspin.client";
 
@@ -126,6 +132,18 @@ LogLevel SendspinClient::get_log_level() {
 bool SendspinClient::start_server() {
     this->started_ = true;
 
+#ifndef ESP_PLATFORM
+    if (this->config_.enable_security) {
+        this->security_state_ = std::make_unique<SendspinSecurityState>(this->persistence_provider_);
+        if (!this->security_state_->initialize()) {
+            SS_LOGE(TAG, "Failed to initialize Sendspin Noise identity/pairing state");
+            return false;
+        }
+        this->config_.client_id = this->security_state_->client_id();
+        SS_LOGI(TAG, "Noise identity initialized: %s", this->config_.client_id.c_str());
+    }
+#endif
+
     // Load persisted state
     this->load_last_played_server();
 
@@ -171,9 +189,17 @@ void SendspinClient::loop() {
     // Process connection lifecycle events (close, disconnect, hello, handoff, retry)
     this->connection_manager_->loop();
 
-    // Handle time synchronization for the active connection via burst strategy
+    // Handle time synchronization for the active connection via burst strategy.
+    // Current encrypted Sendspin requires the first server/activate before any application
+    // traffic such as client/time. Legacy/plain connections keep the existing behavior.
     auto* conn = this->connection_manager_->current();
-    if (conn != nullptr) {
+    bool may_sync_time = conn != nullptr;
+#ifndef ESP_PLATFORM
+    if (may_sync_time && conn->security_enabled() && !this->received_initial_activation_) {
+        may_sync_time = false;
+    }
+#endif
+    if (may_sync_time) {
         auto result = this->time_burst_->loop(conn);
 
         if (result.sent && !this->high_performance_held_for_time_) {
@@ -188,6 +214,15 @@ void SendspinClient::loop() {
             this->listener_->on_time_sync_updated(
                 static_cast<float>(conn->get_time_filter()->get_error()));
         }
+#ifndef ESP_PLATFORM
+        if (result.burst_completed && conn->security_enabled() && !this->secure_time_ready_ &&
+            conn->get_time_filter() != nullptr) {
+            this->secure_time_ready_ = true;
+            SS_LOGI(TAG, "Secure time synchronization ready (error=%" PRId64 " us)",
+                    conn->get_time_filter()->get_error());
+            this->publish_client_state(conn);
+        }
+#endif
     }
 
     // Process deferred events: all state mutations and user callbacks happen here, on the main
@@ -537,6 +572,12 @@ bool SendspinClient::send_binary(const uint8_t* data, size_t len) {
     return conn != nullptr && conn->is_connected() &&
            conn->send_binary_message(data, len) == SsErr::OK;
 }
+#ifndef ESP_PLATFORM
+std::string SendspinClient::get_pairing_token() const {
+    return this->security_state_ ? this->security_state_->pairing_token() : std::string{};
+}
+#endif
+
 bool SendspinClient::is_role_active(const std::string& role) const {
     std::lock_guard<std::mutex> lock(this->active_roles_mutex_);
     return std::find(this->active_roles_.begin(), this->active_roles_.end(), role) != this->active_roles_.end();
@@ -609,6 +650,9 @@ void SendspinClient::cleanup_connection_state() {
 #endif
     this->update_active_roles({});
     this->received_initial_activation_ = false;
+#ifndef ESP_PLATFORM
+    this->management_activity_active_ = false;
+#endif
 #ifdef SENDSPIN_ENABLE_SOURCE
     if (this->source_) this->source_->impl_->cleanup();
 #endif
@@ -645,7 +689,7 @@ void SendspinClient::cleanup_connection_state() {
     }
 }
 
-std::string SendspinClient::build_hello_message() {
+std::string SendspinClient::build_hello_message(SendspinConnection* conn) {
     ClientHelloMessage msg;
     msg.name = this->config_.name;
 
@@ -670,6 +714,14 @@ std::string SendspinClient::build_hello_message() {
     msg.device_info = device_info;
 
     msg.version = 1;
+#ifndef ESP_PLATFORM
+    if (conn != nullptr && conn->security_enabled()) {
+        msg.modern_security = true;
+        msg.trust_level = conn->trust_level();
+        msg.supports_pairing_psk = true;
+        msg.unpaired_access = this->config_.unpaired_access;
+    }
+#endif
 
     // Let each role add its fields to the hello message
 #ifdef SENDSPIN_ENABLE_PLAYER
@@ -851,6 +903,46 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
             break;
         }
         case SendspinServerToClientMessageType::SERVER_HELLO: {
+#ifndef ESP_PLATFORM
+            if (conn != nullptr && conn->security_enabled()) {
+                if (!root["payload"]["name"].is<const char*>()) {
+                    SS_LOGE(TAG, "Invalid secure server/hello message");
+                    conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                    break;
+                }
+                // Every initial handshake and re-handshake starts a fresh hello/activate cycle.
+                this->update_active_roles({});
+                this->received_initial_activation_ = false;
+                this->secure_time_ready_ = false;
+                ServerInformationObject server{};
+                server.name = root["payload"]["name"].as<std::string>();
+                server.server_id = conn->security_server_id();
+                conn->set_server_information(std::move(server));
+                conn->set_connection_reason(SendspinConnectionReason::DISCOVERY);
+                conn->set_server_hello_received(true);
+
+                const std::string hello = this->build_hello_message(conn);
+                const SsErr err = conn->send_text_message(
+                    hello,
+                    [conn](bool success) {
+                        if (success) conn->set_client_hello_sent(true);
+                    },
+                    /*allow_before_hello=*/true);
+                if (err != SsErr::OK) {
+                    SS_LOGE(TAG, "Failed to send secure client/hello");
+                    conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                } else {
+                    SS_LOGI(TAG, "Secure hello sent (trust=%s, source=%s)", conn->trust_level(),
+#ifdef SENDSPIN_ENABLE_SOURCE
+                            this->source_ ? "advertised" : "disabled"
+#else
+                            "disabled"
+#endif
+                    );
+                }
+                break;
+            }
+#endif
             ServerHelloMessage hello_msg;
             if (process_server_hello_message(root, &hello_msg)) {
                 SS_LOGD(TAG, "Connected to server %s with id %s (reason: %s)",
@@ -861,7 +953,6 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
                 // server/hello. Keep that path working while also accepting server/activate
                 // below for newer protocol revisions.
                 this->update_active_roles(hello_msg.active_roles);
-
                 if (conn != nullptr) {
                     conn->set_server_information(std::move(hello_msg.server));
                     conn->set_connection_reason(hello_msg.connection_reason);
@@ -927,12 +1018,103 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
             break;
         }
         case SendspinServerToClientMessageType::SERVER_ACTIVATE: {
+#ifndef ESP_PLATFORM
+            if (conn != nullptr && conn->security_enabled()) {
+                const JsonVariantConst activities_var = root["payload"]["activities"];
+                if (!activities_var.is<JsonArrayConst>()) {
+                    SS_LOGE(TAG, "Secure server/activate missing activities");
+                    conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                    break;
+                }
+                bool pairing = false;
+                bool playback = false;
+                bool management = false;
+                for (JsonVariantConst value : activities_var.as<JsonArrayConst>()) {
+                    if (!value.is<const char*>()) continue;
+                    const std::string activity = value.as<std::string>();
+                    pairing |= activity == "pairing";
+                    playback |= activity == "playback";
+                    management |= activity == "management";
+                }
+                this->management_activity_active_ = management;
+                const char* method = root["payload"]["pairing"]["method"] | "";
+                if (conn->matched_pairing_psk()) {
+                    // Pairing PSK is valid only for the pairing activity, with no playback or
+                    // management, and the server must explicitly select pairing_psk.
+                    if (!pairing || playback || management ||
+                        std::strcmp(method, "pairing_psk") != 0) {
+                        conn->send_text_message(
+                            "{\"type\":\"pair/abort\",\"payload\":{\"reason\":\"method_not_supported\"}}",
+                            nullptr);
+                        conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                        break;
+                    }
+                    std::array<uint8_t, 32> long_term{};
+                    if (!SendspinSecurityState::random_bytes(long_term.data(), long_term.size()) ||
+                        !conn->set_pending_pairing_psk(long_term)) {
+                        conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                        break;
+                    }
+                    const std::string encoded = SendspinSecurityState::base64url_encode(
+                        long_term.data(), long_term.size());
+                    const std::string finalize =
+                        std::string("{\"type\":\"client/pair-finalize\",\"payload\":{\"long_term_psk\":\"") +
+                        encoded + "\"}}";
+                    if (conn->send_text_message(finalize, nullptr) != SsErr::OK) {
+                        conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                        break;
+                    }
+                    SS_LOGI(TAG, "Pairing PSK authenticated; sent long-term PSK to server");
+                } else {
+                    // This client only offers pairing_psk. The server must first re-handshake
+                    // from Sentinel or a long-term PSK to the Pairing PSK before declaring a
+                    // pairing activity. Pairing on any other matched PSK is therefore invalid.
+                    if (pairing) {
+                        conn->send_text_message(
+                            "{\"type\":\"pair/abort\",\"payload\":{\"reason\":\"method_not_supported\"}}",
+                            nullptr);
+                        conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                        break;
+                    }
+                    if (std::strcmp(conn->trust_level(), "user") != 0) {
+                        if (management) {
+                            conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                            break;
+                        }
+                        if (playback && !this->config_.unpaired_access) {
+                            conn->disconnect(SendspinGoodbyeReason::PAIRING_REQUIRED, nullptr);
+                            break;
+                        }
+                    }
+                }
+            }
+#endif
             const JsonVariantConst active = root["payload"]["active_roles"];
             if (active.is<JsonArrayConst>()) {
                 std::vector<std::string> roles;
                 for (JsonVariantConst value : active.as<JsonArrayConst>()) {
                     if (value.is<const char*>()) roles.push_back(value.as<std::string>());
                 }
+#ifndef ESP_PLATFORM
+                if (conn != nullptr && conn->security_enabled()) {
+                    if (conn->matched_pairing_psk() && !roles.empty()) {
+                        SS_LOGE(TAG, "Server activated roles during Pairing-PSK activity");
+                        conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                        break;
+                    }
+                    if (std::strcmp(conn->trust_level(), "user") != 0 &&
+                        std::find(roles.begin(), roles.end(), "source@v1") != roles.end()) {
+                        SS_LOGE(TAG, "Server tried to activate source@v1 without user trust");
+                        conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
+                        break;
+                    }
+                    if (std::strcmp(conn->trust_level(), "user") != 0 &&
+                        !this->config_.unpaired_access && !roles.empty()) {
+                        conn->disconnect(SendspinGoodbyeReason::PAIRING_REQUIRED, nullptr);
+                        break;
+                    }
+                }
+#endif
                 this->update_active_roles(std::move(roles));
                 this->received_initial_activation_ = true;
             } else if (!this->received_initial_activation_) {
@@ -940,7 +1122,30 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
                 this->update_active_roles({});
                 this->received_initial_activation_ = true;
             }
-            // Later omissions preserve the previous active_roles set.
+            SS_LOGI(TAG, "server/activate received (trust=%s)",
+#ifndef ESP_PLATFORM
+                    conn && conn->security_enabled() ? conn->trust_level() : "legacy"
+#else
+                    "legacy"
+#endif
+            );
+            // The modern protocol forbids any other client messages before initial activate.
+            if (conn != nullptr && this->received_initial_activation_) {
+                this->publish_client_state(conn);
+            }
+            break;
+        }
+        case SendspinServerToClientMessageType::SERVER_PAIR_FINALIZE: {
+#ifndef ESP_PLATFORM
+            if (conn != nullptr && conn->security_enabled() && conn->matched_pairing_psk()) {
+                if (conn->commit_pending_pairing_psk()) {
+                    SS_LOGI(TAG, "Pairing complete; persisted long-term PSK for server %s",
+                            conn->security_server_id().c_str());
+                } else {
+                    SS_LOGE(TAG, "Failed to persist completed pairing");
+                }
+            }
+#endif
             break;
         }
         case SendspinServerToClientMessageType::SERVER_COMMAND: {
@@ -959,6 +1164,37 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
             }
 #endif
             break;
+        }
+        case SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG: {
+#ifndef ESP_PLATFORM
+            if (conn == nullptr || !conn->security_enabled() ||
+                std::strcmp(conn->trust_level(), "user") != 0 ||
+                !this->management_activity_active_) {
+                if (conn != nullptr) {
+                    conn->send_text_message(
+                        "{\"type\":\"management/result\",\"payload\":{\"result\":\"permission_denied\"}}",
+                        nullptr);
+                }
+                break;
+            }
+
+            JsonDocument response_doc;
+            response_doc["type"] = "management/result";
+            JsonObject payload = response_doc["payload"].to<JsonObject>();
+            payload["result"] = "ok";
+            JsonObject data = payload["data"].to<JsonObject>();
+            data["pairing_psk"]["enabled"] = true;
+            // This implementation currently persists only per-server stored-pubkey records,
+            // so it has no shared-PSK fallback record to expose as record_mode.psk_id.
+            // Omit record_mode rather than inventing an invalid identifier.
+            data["unpaired_access"]["enabled"] = this->config_.unpaired_access;
+            std::string response;
+            serializeJson(response_doc, response);
+            conn->send_text_message(response, nullptr);
+            break;
+#else
+            break;
+#endif
         }
         case SendspinServerToClientMessageType::GROUP_UPDATE: {
             GroupUpdateMessage group_msg;
@@ -1041,6 +1277,15 @@ void SendspinClient::publish_client_state(SendspinConnection* conn) {
 
     ClientStateMessage state_msg;
     state_msg.state = this->state_;
+#ifndef ESP_PLATFORM
+    if (conn->security_enabled()) {
+        state_msg.modern_security = true;
+        // In current Sendspin, available=true means this endpoint is synchronized and ready
+        // to participate. ERROR and EXTERNAL_SOURCE remain unavailable.
+        state_msg.available = this->secure_time_ready_ &&
+                              (this->state_ == SendspinClientState::SYNCHRONIZED);
+    }
+#endif
 
 #ifdef SENDSPIN_ENABLE_PLAYER
     if (this->player_) this->player_->impl_->build_state_fields(state_msg);
@@ -1092,6 +1337,12 @@ void SendspinClient::persist_last_played_server(const std::string& server_id) {
 // ============================================================================
 
 void SendspinClient::on_handshake_complete(SendspinConnection* conn) {
+#ifndef ESP_PLATFORM
+    if (conn != nullptr && conn->security_enabled()) {
+        // Modern Sendspin waits for the initial server/activate before any state/time messages.
+        return;
+    }
+#endif
     this->publish_client_state(conn);
 }
 

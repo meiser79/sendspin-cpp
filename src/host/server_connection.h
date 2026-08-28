@@ -18,9 +18,13 @@
 #pragma once
 
 #include "connection.h"
+#include "security.h"
 #include <ixwebsocket/IXWebSocket.h>
 
+#include <array>
 #include <functional>
+#include <optional>
+#include <vector>
 #include <memory>
 
 namespace sendspin {
@@ -98,6 +102,16 @@ public:
     /// @param receive_time Server-relative timestamp at which the message was received
     void handle_message(const std::string& data, bool is_binary, int64_t receive_time);
 
+    void configure_security(SendspinSecurityState* state, bool unpaired_access) override;
+    bool begin_security_handshake() override;
+    bool security_enabled() const override { return security_state_ != nullptr; }
+    bool security_established() const override { return security_phase_ == SecurityPhase::TRANSPORT; }
+    const char* trust_level() const override;
+    bool matched_pairing_psk() const override { return matched_psk_kind_ == SendspinPskKind::PAIRING; }
+    const std::string& security_server_id() const override { return security_server_id_; }
+    bool set_pending_pairing_psk(const std::array<uint8_t, 32>& psk) override;
+    bool commit_pending_pairing_psk() override;
+
 protected:
     // Pointer fields
 
@@ -108,6 +122,26 @@ protected:
 
     /// @brief Synthetic socket file descriptor used for connection lookup
     int sockfd_{-1};
+
+private:
+    enum class SecurityPhase : uint8_t { DISABLED, IDLE, WAIT_SERVER_INIT, WAIT_NOISE1, TRANSPORT };
+    bool handle_secure_text(const std::string& data, int64_t receive_time);
+    bool handle_secure_binary(const std::string& data, int64_t receive_time);
+    bool handle_noise_message1(const std::string& json, bool rehandshake);
+    bool send_raw_text(const std::string& text);
+    bool send_raw_binary(const uint8_t* data, size_t len);
+    bool dispatch_decrypted(const std::vector<uint8_t>& plaintext, int64_t receive_time);
+
+    SendspinSecurityState* security_state_{nullptr};
+    bool unpaired_access_{true};
+    SecurityPhase security_phase_{SecurityPhase::DISABLED};
+    std::string client_init_raw_;
+    std::string server_init_raw_;
+    std::string security_server_id_;
+    std::array<uint8_t, 32> security_server_public_{};
+    std::unique_ptr<NoiseResponderSession> noise_session_;
+    SendspinPskKind matched_psk_kind_{SendspinPskKind::SENTINEL};
+    std::optional<std::array<uint8_t, 32>> pending_pairing_psk_;
 };
 
 }  // namespace sendspin

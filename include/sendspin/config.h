@@ -101,6 +101,14 @@ struct SendspinClientConfig {
     /// PSRAM distinction, so the arena is a fixed scratch buffer for the parse (still allocated and
     /// used; harmless).
     size_t json_arena_size{2048};
+
+    /// Enable the current Noise-encrypted Sendspin core protocol on host transports.
+    /// ESP transports keep the legacy handshake until their security backend is implemented.
+    bool enable_security{false};
+
+    /// Allow Sentinel-PSK sessions to activate playback before pairing. Source is never allowed
+    /// at trust level none. Keeping this true preserves the historical player discovery behavior.
+    bool unpaired_access{true};
 };
 
 // ============================================================================

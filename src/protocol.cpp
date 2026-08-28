@@ -295,6 +295,9 @@ SendspinServerToClientMessageType determine_message_type(JsonObject root) {
     if (type_str == "server/activate") {
         return SendspinServerToClientMessageType::SERVER_ACTIVATE;
     }
+    if (type_str == "server/pair-finalize") {
+        return SendspinServerToClientMessageType::SERVER_PAIR_FINALIZE;
+    }
     if (type_str == "server/time") {
         return SendspinServerToClientMessageType::SERVER_TIME;
     }
@@ -315,6 +318,9 @@ SendspinServerToClientMessageType determine_message_type(JsonObject root) {
     }
     if (type_str == "group/update") {
         return SendspinServerToClientMessageType::GROUP_UPDATE;
+    }
+    if (type_str == "management/get-pairing-config") {
+        return SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG;
     }
 
     return SendspinServerToClientMessageType::UNKNOWN;
@@ -819,7 +825,9 @@ std::string format_client_hello_message(const ClientHelloMessage* msg) {
     JsonObject root = doc.to<JsonObject>();
 
     root["type"] = "client/hello";
-    root["payload"]["client_id"] = msg->client_id;
+    if (!msg->modern_security) {
+        root["payload"]["client_id"] = msg->client_id;
+    }
     root["payload"]["name"] = msg->name;
     if (msg->device_info.has_value()) {
         const auto& info = msg->device_info.value();
@@ -836,7 +844,17 @@ std::string format_client_hello_message(const ClientHelloMessage* msg) {
             root["payload"]["device_info"]["mac_address"] = info.mac_address.value();
         }
     }
-    root["payload"]["version"] = msg->version;
+    if (msg->modern_security) {
+        root["payload"]["trust_level"] = msg->trust_level;
+        if (msg->supports_pairing_psk) {
+            JsonObject method =
+                root["payload"]["supported_pair_methods"].to<JsonArray>().add<JsonObject>();
+            method["method"] = "pairing_psk";
+        }
+        root["payload"]["unpaired_access"]["enabled"] = msg->unpaired_access;
+    } else {
+        root["payload"]["version"] = msg->version;
+    }
     JsonArray supported_roles_list = root["payload"]["supported_roles"].to<JsonArray>();
     for (const auto& role : msg->supported_roles) {
         supported_roles_list.add(to_cstr(role));
@@ -904,7 +922,14 @@ std::string format_client_state_message(const ClientStateMessage* msg) {
     JsonObject root = doc.to<JsonObject>();
 
     root["type"] = "client/state";
-    root["payload"]["state"] = to_cstr(msg->state);
+#ifndef ESP_PLATFORM
+    if (msg->modern_security) {
+        root["payload"]["available"] = msg->available;
+    } else
+#endif
+    {
+        root["payload"]["state"] = to_cstr(msg->state);
+    }
 
     if (msg->source.has_value()) {
         const auto& source_state = msg->source.value();
