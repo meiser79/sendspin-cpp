@@ -940,6 +940,7 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
                 conn->set_server_hello_received(true);
 
                 const std::string hello = this->build_hello_message(conn);
+                SS_LOGD(TAG, "TX client/hello JSON: %s", hello.c_str());
                 const SsErr err = conn->send_text_message(
                     hello,
                     [conn](bool success) {
@@ -1201,6 +1202,7 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
                     local["payload"]["result"] = management_result_string(result);
                     std::string response;
                     serializeJson(local, response);
+                    SS_LOGD(TAG, "TX management/result JSON: %s", response.c_str());
                     conn->send_text_message(response, nullptr);
                     return;
                 }
@@ -1208,6 +1210,7 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
                 (*response_doc)["payload"]["result"] = management_result_string(result);
                 std::string response;
                 serializeJson(*response_doc, response);
+                SS_LOGD(TAG, "TX management/result JSON: %s", response.c_str());
                 conn->send_text_message(response, nullptr);
             };
 
@@ -1262,6 +1265,8 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
             }
 
             if (message_type == SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG) {
+                SS_LOGD(TAG, "RX management/get-pairing-config JSON: %.*s",
+                        static_cast<int>(len), data);
                 JsonDocument response;
                 JsonObject data = response["payload"]["data"].to<JsonObject>();
                 data["pairing_psk"]["enabled"] = this->security_state_->pairing_psk_enabled();
