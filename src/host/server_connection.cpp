@@ -262,6 +262,7 @@ bool SendspinServerConnection::handle_noise_message1(const std::string& json, bo
 
     this->noise_session_ = std::move(next);
     this->matched_psk_kind_ = kind;
+    this->matched_psk_id_ = requested_id;
     this->security_phase_ = SecurityPhase::TRANSPORT;
     // A re-handshake starts a fresh hello/activate exchange.
     this->client_hello_sent_ = false;

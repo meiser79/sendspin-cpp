@@ -108,6 +108,7 @@ public:
     bool security_established() const override { return security_phase_ == SecurityPhase::TRANSPORT; }
     const char* trust_level() const override;
     bool matched_pairing_psk() const override { return matched_psk_kind_ == SendspinPskKind::PAIRING; }
+    const std::string& matched_psk_id() const override { return matched_psk_id_; }
     const std::string& security_server_id() const override { return security_server_id_; }
     bool set_pending_pairing_psk(const std::array<uint8_t, 32>& psk) override;
     bool commit_pending_pairing_psk() override;
@@ -141,6 +142,7 @@ private:
     std::array<uint8_t, 32> security_server_public_{};
     std::unique_ptr<NoiseResponderSession> noise_session_;
     SendspinPskKind matched_psk_kind_{SendspinPskKind::SENTINEL};
+    std::string matched_psk_id_;
     std::optional<std::array<uint8_t, 32>> pending_pairing_psk_;
 };
 

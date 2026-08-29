@@ -15,6 +15,7 @@ public:
     void build_state_fields(ClientStateMessage& msg) const;
     void handle_server_command(const std::string& command);
     void handle_activation(bool active);
+    void handle_availability(bool available);
     void cleanup();
 
     bool streaming() const { return streaming_.load(std::memory_order_acquire); }

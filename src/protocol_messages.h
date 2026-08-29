@@ -99,7 +99,12 @@ enum class SendspinServerToClientMessageType : uint8_t {
     STREAM_END,      // stream/end normal stream completion
     STREAM_CLEAR,    // stream/clear immediate buffer flush
     GROUP_UPDATE,    // group/update group membership change
+    MANAGEMENT_LIST_RECORDS,       // management/list-records
+    MANAGEMENT_ADD_RECORD,         // management/add-record
+    MANAGEMENT_REMOVE_RECORD,      // management/remove-record
     MANAGEMENT_GET_PAIRING_CONFIG, // management/get-pairing-config
+    MANAGEMENT_SET_PAIRING_CONFIG, // management/set-pairing-config
+    MANAGEMENT_OPEN_PAIRING_WINDOW,// management/open-pairing-window
     UNKNOWN,         // Unrecognized message type
 };
 

@@ -56,7 +56,9 @@ void SourceRole::Impl::build_state_fields(ClientStateMessage& msg) const {
 std::string SourceRole::Impl::format_stream_start() const {
     JsonDocument doc;
     JsonObject root = doc.to<JsonObject>();
-    root["type"] = "client_stream/start";
+    root["type"] = config_.stream_message_style == SourceStreamMessageStyle::SPEC_HYPHEN
+                       ? "client-stream/start"
+                       : "client_stream/start";
     JsonObject source = root["payload"]["source"].to<JsonObject>();
     source["codec"] = to_cstr(config_.format.codec);
     source["channels"] = config_.format.channels;
@@ -81,13 +83,19 @@ void SourceRole::Impl::start_stream() {
 void SourceRole::Impl::stop_stream() {
     bool expected = true;
     if (!streaming_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) return;
-    client_->send_text("{\"type\":\"client_stream/end\",\"payload\":{\"source\":{}}}");
+    client_->send_text(config_.stream_message_style == SourceStreamMessageStyle::SPEC_HYPHEN
+                           ? "{\"type\":\"client-stream/end\",\"payload\":{\"source\":{}}}"
+                           : "{\"type\":\"client_stream/end\",\"payload\":{\"source\":{}}}");
     SS_LOGI(TAG, "source@v1 streaming stopped");
     if (listener_) listener_->on_source_stop();
 }
 
 void SourceRole::Impl::handle_activation(bool active) {
     if (!active) stop_stream();
+}
+
+void SourceRole::Impl::handle_availability(bool available) {
+    if (!available) stop_stream();
 }
 
 void SourceRole::Impl::handle_server_command(const std::string& command) {

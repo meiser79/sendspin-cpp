@@ -141,6 +141,15 @@ public:
     virtual bool save_pairing_record(const std::string& /*server_id*/, const std::string& /*psk*/) {
         return false;
     }
+
+    /// Extensible host-security state used by the management API. Implementations may persist
+    /// these opaque key/value pairs alongside their normal Sendspin state.
+    virtual std::optional<std::string> load_security_value(const std::string& /*key*/) {
+        return std::nullopt;
+    }
+    virtual bool save_security_value(const std::string& /*key*/, const std::string& /*value*/) {
+        return false;
+    }
 };
 
 /// @brief Log severity levels for host builds

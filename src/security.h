@@ -20,15 +20,25 @@ enum class SendspinPskKind : uint8_t {
 };
 
 struct SendspinPairingRecord {
-    std::string server_id;
+    std::string server_id;  // empty for shared-PSK records
     std::array<uint8_t, 32> psk{};
+    bool used{false};
+};
+
+enum class SendspinManagementResult : uint8_t {
+    OK,
+    PERMISSION_DENIED,
+    ALREADY_EXISTS,
+    INVALID,
+    NOT_FOUND,
+    STORAGE_EXHAUSTED,
 };
 
 class SendspinSecurityState {
 public:
     explicit SendspinSecurityState(SendspinPersistenceProvider* persistence);
 
-    bool initialize();
+    bool initialize(bool default_unpaired_access = true);
     const std::array<uint8_t, 32>& private_key() const { return private_key_; }
     const std::array<uint8_t, 32>& public_key() const { return public_key_; }
     const std::array<uint8_t, 32>& pairing_psk() const { return pairing_psk_; }
@@ -36,9 +46,21 @@ public:
     std::string pairing_token() const;
 
     bool find_psk(const std::string& psk_id, const std::string& server_id,
-                  std::array<uint8_t, 32>& psk, SendspinPskKind& kind) const;
+                  std::array<uint8_t, 32>& psk, SendspinPskKind& kind);
     bool add_record(const std::string& server_id, const std::array<uint8_t, 32>& psk);
     bool has_record_for_server(const std::string& server_id) const;
+
+    const std::vector<SendspinPairingRecord>& records() const { return records_; }
+    bool pairing_psk_enabled() const { return pairing_psk_enabled_; }
+    bool unpaired_access_enabled() const { return unpaired_access_enabled_; }
+    const std::string& record_mode_psk_id() const { return record_mode_psk_id_; }
+    SendspinManagementResult add_management_record(const std::string& server_id,
+                                                   const std::string& encoded_psk);
+    SendspinManagementResult remove_management_record(const std::string& record_psk_id);
+    SendspinManagementResult set_pairing_psk_enabled(bool enabled);
+    SendspinManagementResult replace_pairing_psk(const std::string& encoded_psk);
+    SendspinManagementResult set_unpaired_access(bool enabled);
+    SendspinManagementResult set_record_mode(const std::string& record_psk_id);
 
     static std::string base64url_encode(const uint8_t* data, size_t len);
     static bool base64url_decode(const std::string& text, std::vector<uint8_t>& out);
@@ -52,6 +74,14 @@ private:
     std::array<uint8_t, 32> pairing_psk_{};
     std::vector<SendspinPairingRecord> records_;
     std::string client_id_;
+    bool pairing_psk_enabled_{true};
+    bool unpaired_access_enabled_{true};
+    std::string record_mode_psk_id_;
+
+    bool persist_security_value(const std::string& key, const std::string& value);
+    bool load_bool_security_value(const std::string& key, bool fallback) const;
+    bool is_reserved_psk_id(const std::string& id) const;
+    bool mark_record_used(SendspinPairingRecord& record);
 };
 
 class NoiseResponderSession {

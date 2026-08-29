@@ -23,10 +23,19 @@ struct SourceAudioFormat {
     std::optional<std::string> codec_header{};
 };
 
+/// Wire spelling for source stream-control messages.
+/// LEGACY_UNDERSCORE matches older aiosendspin/Music Assistant releases;
+/// SPEC_HYPHEN matches the current Sendspin specification.
+enum class SourceStreamMessageStyle : uint8_t {
+    LEGACY_UNDERSCORE,
+    SPEC_HYPHEN,
+};
+
 /// source@v1 capability configuration.
 struct SourceRoleConfig {
     SourceAudioFormat format{};
     bool line_sense{true};
+    SourceStreamMessageStyle stream_message_style{SourceStreamMessageStyle::LEGACY_UNDERSCORE};
 };
 
 enum class SendspinSourceSignal : uint8_t { ABSENT, PRESENT };

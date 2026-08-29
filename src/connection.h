@@ -170,6 +170,9 @@ public:
     virtual bool security_established() const { return false; }
     virtual const char* trust_level() const { return "none"; }
     virtual bool matched_pairing_psk() const { return false; }
+    virtual const std::string& matched_psk_id() const {
+        static const std::string empty; return empty;
+    }
     virtual const std::string& security_server_id() const {
         static const std::string empty; return empty;
     }

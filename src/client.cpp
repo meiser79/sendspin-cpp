@@ -58,6 +58,20 @@ static const char* const TAG = "sendspin.client";
 
 namespace sendspin {
 
+#ifndef ESP_PLATFORM
+static const char* management_result_string(SendspinManagementResult result) {
+    switch (result) {
+        case SendspinManagementResult::OK: return "ok";
+        case SendspinManagementResult::PERMISSION_DENIED: return "permission_denied";
+        case SendspinManagementResult::ALREADY_EXISTS: return "already_exists";
+        case SendspinManagementResult::INVALID: return "invalid";
+        case SendspinManagementResult::NOT_FOUND: return "not_found";
+        case SendspinManagementResult::STORAGE_EXHAUSTED: return "storage_exhausted";
+    }
+    return "invalid";
+}
+#endif
+
 /// @brief Deferred event state for time responses and group updates on the main thread
 struct SendspinClient::EventState {
     Inbox inbox;
@@ -135,11 +149,12 @@ bool SendspinClient::start_server() {
 #ifndef ESP_PLATFORM
     if (this->config_.enable_security) {
         this->security_state_ = std::make_unique<SendspinSecurityState>(this->persistence_provider_);
-        if (!this->security_state_->initialize()) {
+        if (!this->security_state_->initialize(this->config_.unpaired_access)) {
             SS_LOGE(TAG, "Failed to initialize Sendspin Noise identity/pairing state");
             return false;
         }
         this->config_.client_id = this->security_state_->client_id();
+        this->config_.unpaired_access = this->security_state_->unpaired_access_enabled();
         SS_LOGI(TAG, "Noise identity initialized: %s", this->config_.client_id.c_str());
     }
 #endif
@@ -718,8 +733,11 @@ std::string SendspinClient::build_hello_message(SendspinConnection* conn) {
     if (conn != nullptr && conn->security_enabled()) {
         msg.modern_security = true;
         msg.trust_level = conn->trust_level();
-        msg.supports_pairing_psk = true;
-        msg.unpaired_access = this->config_.unpaired_access;
+        msg.supports_pairing_psk = this->security_state_ == nullptr ||
+                                   this->security_state_->pairing_psk_enabled();
+        msg.unpaired_access = this->security_state_ != nullptr
+                                  ? this->security_state_->unpaired_access_enabled()
+                                  : this->config_.unpaired_access;
     }
 #endif
 
@@ -1165,32 +1183,155 @@ void SendspinClient::process_json_message(SendspinConnection* conn, const char* 
 #endif
             break;
         }
-        case SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG: {
+        case SendspinServerToClientMessageType::MANAGEMENT_LIST_RECORDS:
+        case SendspinServerToClientMessageType::MANAGEMENT_ADD_RECORD:
+        case SendspinServerToClientMessageType::MANAGEMENT_REMOVE_RECORD:
+        case SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG:
+        case SendspinServerToClientMessageType::MANAGEMENT_SET_PAIRING_CONFIG:
+        case SendspinServerToClientMessageType::MANAGEMENT_OPEN_PAIRING_WINDOW: {
 #ifndef ESP_PLATFORM
-            if (conn == nullptr || !conn->security_enabled() ||
-                std::strcmp(conn->trust_level(), "user") != 0 ||
-                !this->management_activity_active_) {
-                if (conn != nullptr) {
-                    conn->send_text_message(
-                        "{\"type\":\"management/result\",\"payload\":{\"result\":\"permission_denied\"}}",
-                        nullptr);
+            const bool authorized = conn != nullptr && conn->security_enabled() &&
+                                    std::strcmp(conn->trust_level(), "user") == 0 &&
+                                    this->management_activity_active_ && this->security_state_;
+            auto send_result = [&](SendspinManagementResult result, JsonDocument* response_doc = nullptr) {
+                if (conn == nullptr) return;
+                if (response_doc == nullptr) {
+                    JsonDocument local;
+                    local["type"] = "management/result";
+                    local["payload"]["result"] = management_result_string(result);
+                    std::string response;
+                    serializeJson(local, response);
+                    conn->send_text_message(response, nullptr);
+                    return;
+                }
+                (*response_doc)["type"] = "management/result";
+                (*response_doc)["payload"]["result"] = management_result_string(result);
+                std::string response;
+                serializeJson(*response_doc, response);
+                conn->send_text_message(response, nullptr);
+            };
+
+            if (!authorized) {
+                send_result(SendspinManagementResult::PERMISSION_DENIED);
+                break;
+            }
+
+            if (message_type == SendspinServerToClientMessageType::MANAGEMENT_LIST_RECORDS) {
+                JsonDocument response;
+                JsonArray records = response["payload"]["data"]["records"].to<JsonArray>();
+                for (const auto& record : this->security_state_->records()) {
+                    JsonObject out = records.add<JsonObject>();
+                    out["psk_id"] = SendspinSecurityState::psk_id(record.psk);
+                    if (!record.server_id.empty()) out["server_id"] = record.server_id;
+                    out["used"] = record.used;
+                }
+                send_result(SendspinManagementResult::OK, &response);
+                break;
+            }
+
+            if (message_type == SendspinServerToClientMessageType::MANAGEMENT_ADD_RECORD) {
+                const char* psk = root["payload"]["psk"] | "";
+                std::string server_id;
+                if (root["payload"]["server_id"].is<const char*>()) {
+                    server_id = root["payload"]["server_id"].as<std::string>();
+                    std::vector<uint8_t> decoded;
+                    if (server_id.size() != 43 ||
+                        !SendspinSecurityState::base64url_decode(server_id, decoded) ||
+                        decoded.size() != 32) {
+                        send_result(SendspinManagementResult::INVALID);
+                        break;
+                    }
+                }
+                send_result(this->security_state_->add_management_record(server_id, psk));
+                break;
+            }
+
+            if (message_type == SendspinServerToClientMessageType::MANAGEMENT_REMOVE_RECORD) {
+                const char* id = root["payload"]["psk_id"] | "";
+                if (std::strlen(id) != 43) {
+                    send_result(SendspinManagementResult::INVALID);
+                    break;
+                }
+                const bool removing_self = conn->matched_psk_id() == id;
+                const auto result = this->security_state_->remove_management_record(id);
+                send_result(result);
+                if (result == SendspinManagementResult::OK && removing_self) {
+                    conn->disconnect(SendspinGoodbyeReason::UNAUTHORIZED, nullptr);
                 }
                 break;
             }
 
-            JsonDocument response_doc;
-            response_doc["type"] = "management/result";
-            JsonObject payload = response_doc["payload"].to<JsonObject>();
-            payload["result"] = "ok";
-            JsonObject data = payload["data"].to<JsonObject>();
-            data["pairing_psk"]["enabled"] = true;
-            // This implementation currently persists only per-server stored-pubkey records,
-            // so it has no shared-PSK fallback record to expose as record_mode.psk_id.
-            // Omit record_mode rather than inventing an invalid identifier.
-            data["unpaired_access"]["enabled"] = this->config_.unpaired_access;
-            std::string response;
-            serializeJson(response_doc, response);
-            conn->send_text_message(response, nullptr);
+            if (message_type == SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG) {
+                JsonDocument response;
+                JsonObject data = response["payload"]["data"].to<JsonObject>();
+                data["pairing_psk"]["enabled"] = this->security_state_->pairing_psk_enabled();
+                data["pairing_psk"]["descriptor"]["method"] = "pairing_psk";
+                data["pairing_psk"]["descriptor"]["locations"].to<JsonArray>().add("device");
+                const auto& record_mode_psk_id = this->security_state_->record_mode_psk_id();
+                if (!record_mode_psk_id.empty()) {
+                    data["record_mode"]["psk_id"] = record_mode_psk_id;
+                }
+                data["unpaired_access"]["enabled"] =
+                    this->security_state_->unpaired_access_enabled();
+                send_result(SendspinManagementResult::OK, &response);
+                break;
+            }
+
+            if (message_type == SendspinServerToClientMessageType::MANAGEMENT_SET_PAIRING_CONFIG) {
+                // This client implements pairing_psk only; PIN method patches are invalid.
+                if (!root["payload"]["static_pin"].isNull() ||
+                    !root["payload"]["dynamic_pin"].isNull()) {
+                    send_result(SendspinManagementResult::INVALID);
+                    break;
+                }
+                SendspinManagementResult result = SendspinManagementResult::OK;
+                JsonVariant pairing = root["payload"]["pairing_psk"];
+                if (!pairing.isNull()) {
+                    if (!pairing.is<JsonObject>()) {
+                        result = SendspinManagementResult::INVALID;
+                    } else {
+                        if (pairing["psk"].is<const char*>()) {
+                            result = this->security_state_->replace_pairing_psk(
+                                pairing["psk"].as<std::string>());
+                        }
+                        if (result == SendspinManagementResult::OK && pairing["enabled"].is<bool>()) {
+                            result = this->security_state_->set_pairing_psk_enabled(
+                                pairing["enabled"].as<bool>());
+                        } else if (result == SendspinManagementResult::OK &&
+                                   !pairing["enabled"].isNull() && !pairing["enabled"].is<bool>()) {
+                            result = SendspinManagementResult::INVALID;
+                        }
+                    }
+                }
+                JsonVariant record_mode = root["payload"]["record_mode"];
+                if (result == SendspinManagementResult::OK && !record_mode.isNull()) {
+                    if (!record_mode.is<JsonObject>() || !record_mode["psk_id"].is<const char*>()) {
+                        result = SendspinManagementResult::INVALID;
+                    } else {
+                        result = this->security_state_->set_record_mode(
+                            record_mode["psk_id"].as<std::string>());
+                    }
+                }
+                JsonVariant unpaired = root["payload"]["unpaired_access"];
+                if (result == SendspinManagementResult::OK && !unpaired.isNull()) {
+                    if (!unpaired.is<JsonObject>() ||
+                        (!unpaired["enabled"].isNull() && !unpaired["enabled"].is<bool>())) {
+                        result = SendspinManagementResult::INVALID;
+                    } else if (unpaired["enabled"].is<bool>()) {
+                        result = this->security_state_->set_unpaired_access(
+                            unpaired["enabled"].as<bool>());
+                        if (result == SendspinManagementResult::OK) {
+                            this->config_.unpaired_access =
+                                this->security_state_->unpaired_access_enabled();
+                        }
+                    }
+                }
+                send_result(result);
+                break;
+            }
+
+            // No static/dynamic PIN method is implemented, therefore no pairing window exists.
+            send_result(SendspinManagementResult::INVALID);
             break;
 #else
             break;
@@ -1284,6 +1425,13 @@ void SendspinClient::publish_client_state(SendspinConnection* conn) {
         // to participate. ERROR and EXTERNAL_SOURCE remain unavailable.
         state_msg.available = this->secure_time_ready_ &&
                               (this->state_ == SendspinClientState::SYNCHRONIZED);
+    }
+#endif
+
+#ifdef SENDSPIN_ENABLE_SOURCE
+    // source@v1: an open source stream must end before available=false is published.
+    if (!state_msg.available && this->source_ && this->source_->streaming()) {
+        this->source_->impl_->handle_availability(false);
     }
 #endif
 

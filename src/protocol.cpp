@@ -319,8 +319,23 @@ SendspinServerToClientMessageType determine_message_type(JsonObject root) {
     if (type_str == "group/update") {
         return SendspinServerToClientMessageType::GROUP_UPDATE;
     }
+    if (type_str == "management/list-records") {
+        return SendspinServerToClientMessageType::MANAGEMENT_LIST_RECORDS;
+    }
+    if (type_str == "management/add-record") {
+        return SendspinServerToClientMessageType::MANAGEMENT_ADD_RECORD;
+    }
+    if (type_str == "management/remove-record") {
+        return SendspinServerToClientMessageType::MANAGEMENT_REMOVE_RECORD;
+    }
     if (type_str == "management/get-pairing-config") {
         return SendspinServerToClientMessageType::MANAGEMENT_GET_PAIRING_CONFIG;
+    }
+    if (type_str == "management/set-pairing-config") {
+        return SendspinServerToClientMessageType::MANAGEMENT_SET_PAIRING_CONFIG;
+    }
+    if (type_str == "management/open-pairing-window") {
+        return SendspinServerToClientMessageType::MANAGEMENT_OPEN_PAIRING_WINDOW;
     }
 
     return SendspinServerToClientMessageType::UNKNOWN;
@@ -850,6 +865,7 @@ std::string format_client_hello_message(const ClientHelloMessage* msg) {
             JsonObject method =
                 root["payload"]["supported_pair_methods"].to<JsonArray>().add<JsonObject>();
             method["method"] = "pairing_psk";
+            method["locations"].to<JsonArray>().add("device");
         }
         root["payload"]["unpaired_access"]["enabled"] = msg->unpaired_access;
     } else {

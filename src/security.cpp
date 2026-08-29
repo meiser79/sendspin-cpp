@@ -105,7 +105,7 @@ std::string SendspinSecurityState::psk_id(const std::array<uint8_t, 32>& psk) {
     return base64url_encode(digest.data(), digest.size());
 }
 
-bool SendspinSecurityState::initialize() {
+bool SendspinSecurityState::initialize(bool default_unpaired_access) {
     auto load32 = [](const std::optional<std::string>& encoded, std::array<uint8_t, 32>& target) {
         if (!encoded) return false;
         std::vector<uint8_t> raw;
@@ -138,6 +138,10 @@ bool SendspinSecurityState::initialize() {
         }
     }
 
+    pairing_psk_enabled_ = load_bool_security_value("management.pairing_psk_enabled", true);
+    unpaired_access_enabled_ =
+        load_bool_security_value("management.unpaired_access", default_unpaired_access);
+
     records_.clear();
     if (persistence_) {
         for (const auto& record : persistence_->load_pairing_records()) {
@@ -146,6 +150,36 @@ bool SendspinSecurityState::initialize() {
                 SendspinPairingRecord converted;
                 converted.server_id = record.server_id;
                 std::copy(raw.begin(), raw.end(), converted.psk.begin());
+                const std::string id = psk_id(converted.psk);
+                if (persistence_->load_security_value("management.removed." + id).value_or("") == "1")
+                    continue;
+                converted.used =
+                    persistence_->load_security_value("management.used." + id).value_or("") == "1";
+                records_.push_back(std::move(converted));
+            }
+        }
+
+        record_mode_psk_id_ =
+            persistence_->load_security_value("management.record_mode_psk_id").value_or("");
+        const std::string shared_ids =
+            persistence_->load_security_value("management.shared_ids").value_or("");
+        size_t begin = 0;
+        while (begin < shared_ids.size()) {
+            const size_t comma = shared_ids.find(',', begin);
+            const std::string id = shared_ids.substr(
+                begin, comma == std::string::npos ? std::string::npos : comma - begin);
+            begin = comma == std::string::npos ? shared_ids.size() : comma + 1;
+            if (id.empty() ||
+                persistence_->load_security_value("management.removed." + id).value_or("") == "1")
+                continue;
+            const auto shared = persistence_->load_security_value("management.shared." + id);
+            if (!shared.has_value()) continue;
+            std::vector<uint8_t> raw;
+            if (base64url_decode(*shared, raw) && raw.size() == 32) {
+                SendspinPairingRecord converted;
+                std::copy(raw.begin(), raw.end(), converted.psk.begin());
+                converted.used = persistence_->load_security_value(
+                    "management.used." + id).value_or("") == "1";
                 records_.push_back(std::move(converted));
             }
         }
@@ -154,6 +188,7 @@ bool SendspinSecurityState::initialize() {
 }
 
 std::string SendspinSecurityState::pairing_token() const {
+    if (!pairing_psk_enabled_) return {};
     std::array<uint8_t, 64> payload{};
     std::copy(public_key_.begin(), public_key_.end(), payload.begin());
     std::copy(pairing_psk_.begin(), pairing_psk_.end(), payload.begin() + 32);
@@ -168,16 +203,18 @@ std::string SendspinSecurityState::pairing_token() const {
 }
 
 bool SendspinSecurityState::find_psk(const std::string& requested_id, const std::string& server_id,
-                                     std::array<uint8_t, 32>& psk, SendspinPskKind& kind) const {
-    if (requested_id == psk_id(pairing_psk_)) {
+                                     std::array<uint8_t, 32>& psk, SendspinPskKind& kind) {
+    if (pairing_psk_enabled_ && requested_id == psk_id(pairing_psk_)) {
         psk = pairing_psk_;
         kind = SendspinPskKind::PAIRING;
         return true;
     }
-    for (const auto& record : records_) {
-        if (record.server_id == server_id && requested_id == psk_id(record.psk)) {
+    for (auto& record : records_) {
+        if ((record.server_id.empty() || record.server_id == server_id) &&
+            requested_id == psk_id(record.psk)) {
             psk = record.psk;
             kind = SendspinPskKind::LONG_TERM;
+            mark_record_used(record);
             return true;
         }
     }
@@ -216,6 +253,123 @@ bool SendspinSecurityState::has_record_for_server(const std::string& server_id) 
     return std::any_of(records_.begin(), records_.end(), [&](const auto& record) {
         return record.server_id == server_id;
     });
+}
+
+
+bool SendspinSecurityState::persist_security_value(const std::string& key, const std::string& value) {
+    return persistence_ == nullptr || persistence_->save_security_value(key, value);
+}
+
+bool SendspinSecurityState::load_bool_security_value(const std::string& key, bool fallback) const {
+    if (!persistence_) return fallback;
+    const auto value = persistence_->load_security_value(key);
+    if (!value.has_value()) return fallback;
+    if (*value == "true") return true;
+    if (*value == "false") return false;
+    return fallback;
+}
+
+bool SendspinSecurityState::is_reserved_psk_id(const std::string& id) const {
+    std::array<uint8_t, 32> sentinel{};
+    std::copy(std::begin(SENTINEL_PSK_BYTES), std::end(SENTINEL_PSK_BYTES), sentinel.begin());
+    if (id == psk_id(sentinel) || id == psk_id(pairing_psk_)) return true;
+    return std::any_of(records_.begin(), records_.end(), [&](const auto& record) {
+        return id == psk_id(record.psk);
+    });
+}
+
+bool SendspinSecurityState::mark_record_used(SendspinPairingRecord& record) {
+    if (record.used) return true;
+    record.used = true;
+    return persist_security_value("management.used." + psk_id(record.psk), "1");
+}
+
+SendspinManagementResult SendspinSecurityState::add_management_record(
+    const std::string& server_id, const std::string& encoded_psk) {
+    std::vector<uint8_t> raw;
+    if (!base64url_decode(encoded_psk, raw) || raw.size() != 32 || encoded_psk.size() != 43)
+        return SendspinManagementResult::INVALID;
+    std::array<uint8_t, 32> psk{};
+    std::copy(raw.begin(), raw.end(), psk.begin());
+    const std::string id = psk_id(psk);
+    if (is_reserved_psk_id(id)) return SendspinManagementResult::ALREADY_EXISTS;
+    SendspinPairingRecord record{server_id, psk, false};
+    records_.push_back(record);
+    bool ok = true;
+    if (persistence_) {
+        if (server_id.empty()) {
+            const std::string existing_ids =
+                persistence_->load_security_value("management.shared_ids").value_or("");
+            const std::string next_ids = existing_ids.empty() ? id : existing_ids + "," + id;
+            ok = persistence_->save_security_value("management.shared." + id, encoded_psk) &&
+                 persistence_->save_security_value("management.shared_ids", next_ids);
+        } else {
+            ok = persistence_->save_pairing_record(server_id, encoded_psk);
+        }
+        ok = persistence_->save_security_value("management.used." + id, "0") &&
+             persistence_->save_security_value("management.removed." + id, "0") && ok;
+    }
+    if (!ok) {
+        records_.pop_back();
+        return SendspinManagementResult::STORAGE_EXHAUSTED;
+    }
+    return SendspinManagementResult::OK;
+}
+
+SendspinManagementResult SendspinSecurityState::remove_management_record(
+    const std::string& record_psk_id) {
+    auto it = std::find_if(records_.begin(), records_.end(), [&](const auto& record) {
+        return psk_id(record.psk) == record_psk_id;
+    });
+    if (it == records_.end()) return SendspinManagementResult::NOT_FOUND;
+    if (record_psk_id == record_mode_psk_id_) return SendspinManagementResult::INVALID;
+    if (!persist_security_value("management.removed." + record_psk_id, "1"))
+        return SendspinManagementResult::STORAGE_EXHAUSTED;
+    records_.erase(it);
+    return SendspinManagementResult::OK;
+}
+
+SendspinManagementResult SendspinSecurityState::set_pairing_psk_enabled(bool enabled) {
+    if (!persist_security_value("management.pairing_psk_enabled", enabled ? "true" : "false"))
+        return SendspinManagementResult::STORAGE_EXHAUSTED;
+    pairing_psk_enabled_ = enabled;
+    return SendspinManagementResult::OK;
+}
+
+SendspinManagementResult SendspinSecurityState::replace_pairing_psk(const std::string& encoded_psk) {
+    std::vector<uint8_t> raw;
+    if (!base64url_decode(encoded_psk, raw) || raw.size() != 32 || encoded_psk.size() != 43)
+        return SendspinManagementResult::INVALID;
+    std::array<uint8_t, 32> next{};
+    std::copy(raw.begin(), raw.end(), next.begin());
+    const std::string id = psk_id(next);
+    std::array<uint8_t, 32> sentinel{};
+    std::copy(std::begin(SENTINEL_PSK_BYTES), std::end(SENTINEL_PSK_BYTES), sentinel.begin());
+    if (id == psk_id(sentinel) || std::any_of(records_.begin(), records_.end(), [&](const auto& r) {
+            return id == psk_id(r.psk);
+        })) return SendspinManagementResult::ALREADY_EXISTS;
+    if (persistence_ && !persistence_->save_pairing_psk(encoded_psk))
+        return SendspinManagementResult::STORAGE_EXHAUSTED;
+    pairing_psk_ = next;
+    return SendspinManagementResult::OK;
+}
+
+SendspinManagementResult SendspinSecurityState::set_unpaired_access(bool enabled) {
+    if (!persist_security_value("management.unpaired_access", enabled ? "true" : "false"))
+        return SendspinManagementResult::STORAGE_EXHAUSTED;
+    unpaired_access_enabled_ = enabled;
+    return SendspinManagementResult::OK;
+}
+
+SendspinManagementResult SendspinSecurityState::set_record_mode(const std::string& record_psk_id) {
+    const bool valid = std::any_of(records_.begin(), records_.end(), [&](const auto& record) {
+        return record.server_id.empty() && psk_id(record.psk) == record_psk_id;
+    });
+    if (!valid) return SendspinManagementResult::INVALID;
+    if (!persist_security_value("management.record_mode_psk_id", record_psk_id))
+        return SendspinManagementResult::STORAGE_EXHAUSTED;
+    record_mode_psk_id_ = record_psk_id;
+    return SendspinManagementResult::OK;
 }
 
 NoiseResponderSession::NoiseResponderSession() = default;
