@@ -115,8 +115,9 @@ public:
 
     /// @brief Reports the capture input's signal state, published to the server in client/state
     ///
-    /// Main loop only. Meaningful only with SourceRoleConfig::line_sense set; ignored (with a
-    /// warning) otherwise.
+    /// Main loop only. Every client/state carries one (roles/source/v1.md "client/state source
+    /// object"); it is ABSENT until this is first called, so a source that never detects
+    /// anything never hints a start.
     void set_signal(SourceSignal signal);
 
     /// @brief Whether the input stream is open, as the started/stopped callbacks last reported.

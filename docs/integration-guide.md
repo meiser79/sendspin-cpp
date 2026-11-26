@@ -191,7 +191,7 @@ source.write_audio(pcm_bytes, len, capture_time_us);
 
 It never waits or allocates. It refuses audio while the stream is closed, a write that is not a whole number of frames, a write longer than the capture buffer takes at once (see `capture_buffer_ms` in [SourceRoleConfig](#sourceroleconfig)), and a write that finds the capture buffer full; after a stall the stream resumes from live capture rather than sending the stale backlog. Start capturing in `on_streaming_started()` and stop in `on_streaming_stopped()` (see [SourceRoleListener](#sourcerolelistener)); the client holds high-performance networking (`on_request_high_performance()`) between the two, as it does during playback. Stop calling `write_audio()` before destroying the client.
 
-A role configured with `line_sense` reports the capture input's signal state from the main loop thread, which goes to the server in `client/state`:
+The role reports the capture input's signal state in every `client/state`, as roles/source/v1.md requires. It is `ABSENT` until set, so a source that detects nothing never hints a start; set it from the main loop thread:
 
 ```cpp
 source.set_signal(SourceSignal::PRESENT);  // or ABSENT
@@ -1592,7 +1592,6 @@ Configuration passed to `client.add_source()`. A value that breaks any rule belo
 | `capture_buffer_ms` | `uint32_t` | `500` | More than 0 ms; about the longest network stall the stream rides out without a gap; a longer one resumes from live capture. A single write must fit in just under 5/8 of it. |
 | `opus_bitrate` | `uint32_t` | `128000` | Opus bitrate in bit/s, 500 to 512000; ignored for `PCM` and `FLAC` |
 | `opus_complexity` | `uint8_t` | `2` | Opus encoder complexity, at most 10; ignored for `PCM` and `FLAC` |
-| `line_sense` | `bool` | `false` | Advertise signal sensing; see `SourceRole::set_signal()` |
 | `buffer_location` | `MemoryLocation` | `PREFER_EXTERNAL` | Placement of the capture buffer, the chunk buffer and a `FLAC` or `OPUS` encoder's chunk scratch (ESP-IDF only) |
 | `priority` | `unsigned` | `3` | FreeRTOS priority for the source task, below the protocol and httpd tasks (ESP-IDF only) |
 | `psram_stack` | `bool` | `false` | Allocate the source task stack in PSRAM (ESP-IDF only) |
@@ -1746,7 +1745,7 @@ These represent commands the server can send to the player. The player advertise
 | `PRESENT` | Audio signal detected on the capture input |
 | `ABSENT` | No audio signal on the capture input |
 
-Reported with `SourceRole::set_signal()`; meaningful only with `SourceRoleConfig::line_sense` set.
+Reported with `SourceRole::set_signal()`, and `ABSENT` until it is first called.
 
 ### LogLevel
 

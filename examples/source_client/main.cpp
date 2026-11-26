@@ -495,7 +495,6 @@ int main(int argc, char* argv[]) {
     source_config.channels = channels;
     source_config.bit_depth = CAPTURE_BIT_DEPTH;
     source_config.codec = codec;
-    source_config.line_sense = line_sense_dbfs.has_value();
     auto& source = client.add_source(std::move(source_config));
 
     if (!capture.open(source, CAPTURE_SAMPLE_RATE, channels)) {

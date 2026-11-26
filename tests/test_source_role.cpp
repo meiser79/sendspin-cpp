@@ -502,38 +502,28 @@ TEST(SourceConfigValidation, RejectsUnusableFormats) {
 }
 
 // roles/source/v1.md "client/hello source@v1 support object" and "client/state source object":
-// a usable role advertises itself with its line_sense hint, an unusable one not at all, and the
-// state object carries a signal only for a role that senses one. The hello and state objects are
+// a usable role advertises itself with an empty support object, an unusable one not at all, and
+// the state object always carries a signal, absent until one is set. The hello and state objects are
 // built without a server, through SourceRole's impl_.
 TEST(SourceRoleObjects, HelloAndStateFields) {
     SendspinClient client(SendspinClientConfig{});
-    SourceRoleConfig config;
-    config.line_sense = true;
-    SourceRole& source = client.add_source(config);
+    SourceRole& source = client.add_source(SourceRoleConfig{});
 
     ClientHelloMessage hello;
     source.impl_->build_hello_fields(hello);
     ASSERT_EQ(hello.supported_roles.size(), 1U);
     EXPECT_EQ(hello.supported_roles[0], SendspinRole::SOURCE);
-    ASSERT_TRUE(hello.source_v1_support.has_value());
-    EXPECT_TRUE(hello.source_v1_support->line_sense);
 
     ClientStateMessage state;
     source.impl_->build_state_fields(state);
     ASSERT_TRUE(state.source.has_value());
-    EXPECT_FALSE(state.source->signal.has_value()) << "no signal reported yet";
+    EXPECT_EQ(state.source->signal, SourceSignal::ABSENT) << "absent until one is set";
     source.set_signal(SourceSignal::PRESENT);
     source.impl_->build_state_fields(state);
     EXPECT_EQ(state.source->signal, SourceSignal::PRESENT);
-
-    // Without line_sense the object is present but never carries a signal.
-    SendspinClient plain_client(SendspinClientConfig{});
-    SourceRole& plain = plain_client.add_source(SourceRoleConfig{});
-    plain.set_signal(SourceSignal::PRESENT);
-    ClientStateMessage plain_state;
-    plain.impl_->build_state_fields(plain_state);
-    ASSERT_TRUE(plain_state.source.has_value());
-    EXPECT_FALSE(plain_state.source->signal.has_value());
+    source.set_signal(SourceSignal::ABSENT);
+    source.impl_->build_state_fields(state);
+    EXPECT_EQ(state.source->signal, SourceSignal::ABSENT);
 
     // An unusable config is never advertised, and does not fail the client's start.
     SendspinClient bad_client(SendspinClientConfig{});
@@ -543,7 +533,6 @@ TEST(SourceRoleObjects, HelloAndStateFields) {
     ClientHelloMessage bad_hello;
     bad.impl_->build_hello_fields(bad_hello);
     EXPECT_TRUE(bad_hello.supported_roles.empty());
-    EXPECT_FALSE(bad_hello.source_v1_support.has_value());
     EXPECT_TRUE(bad.impl_->start(nullptr));
     EXPECT_EQ(bad.impl_->task->outbound_ring(), nullptr) << "an unusable source started its task";
 }

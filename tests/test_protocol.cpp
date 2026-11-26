@@ -2447,43 +2447,23 @@ TEST(Protocol, Be64HelpersAreBigEndianAndRoundTrip) {
     }
 }
 
-// messaging.md "client/hello" requires the object whenever source@v1 is listed, so it is emitted
-// even with no features; line_sense is emitted only when set (roles/source/v1.md "client/hello
-// source@v1 support object").
-TEST(Protocol, FormatClientHelloSourceSupport) {
+// messaging.md "client/hello" defines no source@v1_support object for a client (the line_sense
+// feature it once had is gone), and forbids sending fields it does not define.
+TEST(Protocol, FormatClientHelloSourceSendsNoSupportObject) {
     ClientHelloMessage msg;
     msg.name = "Line In";
     msg.supported_roles.push_back(SendspinRole::SOURCE);
 
-    msg.source_v1_support = SourceSupportObject{.line_sense = true};
     JsonDocument doc;
     ASSERT_FALSE(deserializeJson(doc, built_text([&](JsonDocument& message) {
                                      build_client_hello_message(&msg, message);
                                  })));
     EXPECT_STREQ(doc["payload"]["supported_roles"][0], "source@v1");
-    ASSERT_TRUE(doc["payload"]["source@v1_support"]["features"]["line_sense"].is<bool>());
-    EXPECT_TRUE(doc["payload"]["source@v1_support"]["features"]["line_sense"].as<bool>());
-
-    msg.source_v1_support = SourceSupportObject{};
-    JsonDocument doc_no_features;
-    ASSERT_FALSE(deserializeJson(doc_no_features, built_text([&](JsonDocument& message) {
-                                     build_client_hello_message(&msg, message);
-                                 })));
-    ASSERT_TRUE(doc_no_features["payload"]["source@v1_support"].is<JsonObject>());
-    EXPECT_EQ(doc_no_features["payload"]["source@v1_support"].as<JsonObject>().size(), 0U);
-
-    // Control: a client without the role sends no support object.
-    msg.supported_roles.clear();
-    msg.source_v1_support.reset();
-    JsonDocument doc_unset;
-    ASSERT_FALSE(deserializeJson(doc_unset, built_text([&](JsonDocument& message) {
-                                     build_client_hello_message(&msg, message);
-                                 })));
-    EXPECT_TRUE(doc_unset["payload"]["source@v1_support"].isUnbound());
+    EXPECT_TRUE(doc["payload"]["source@v1_support"].isUnbound());
 }
 
-// roles/source/v1.md "client/state source object": absent when unset, present and empty without a
-// signal, and carrying the signal when one is reported.
+// roles/source/v1.md "client/state source object": absent when unset, and otherwise always
+// carrying the signal it requires, absent by default.
 TEST(Protocol, FormatClientStateSourceObject) {
     ClientStateMessage msg;
     JsonDocument doc_unset;
@@ -2493,19 +2473,18 @@ TEST(Protocol, FormatClientStateSourceObject) {
     EXPECT_TRUE(doc_unset["payload"]["source"].isUnbound());
 
     msg.source = ClientSourceStateObject{};
-    JsonDocument doc_empty;
-    ASSERT_FALSE(deserializeJson(doc_empty, built_text([&](JsonDocument& message) {
+    JsonDocument doc_default;
+    ASSERT_FALSE(deserializeJson(doc_default, built_text([&](JsonDocument& message) {
                                      build_client_state_message(&msg, message);
                                  })));
-    ASSERT_TRUE(doc_empty["payload"]["source"].is<JsonObject>());
-    EXPECT_EQ(doc_empty["payload"]["source"].as<JsonObject>().size(), 0U);
+    EXPECT_STREQ(doc_default["payload"]["source"]["signal"], "absent");
 
-    msg.source = ClientSourceStateObject{.signal = SourceSignal::ABSENT};
+    msg.source = ClientSourceStateObject{.signal = SourceSignal::PRESENT};
     JsonDocument doc_signal;
     ASSERT_FALSE(deserializeJson(doc_signal, built_text([&](JsonDocument& message) {
                                      build_client_state_message(&msg, message);
                                  })));
-    EXPECT_STREQ(doc_signal["payload"]["source"]["signal"], "absent");
+    EXPECT_STREQ(doc_signal["payload"]["source"]["signal"], "present");
 }
 
 // roles/source/v1.md "client-stream/start": the hyphenated type string, every format field, and

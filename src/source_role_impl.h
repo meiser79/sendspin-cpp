@@ -139,8 +139,9 @@ struct SourceRole::Impl : RoleTeardown {
 
     // Struct fields
     SourceRoleConfig config;
-    /// Last set_signal() value, reported in client/state once set. Main loop only.
-    std::optional<SourceSignal> signal;
+    /// Last set_signal() value, reported in every client/state; ABSENT until one is set.
+    /// Main loop only.
+    SourceSignal signal{SourceSignal::ABSENT};
 
     // Pointer fields
     SendspinClient* client;
