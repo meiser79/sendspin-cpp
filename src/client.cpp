@@ -1784,6 +1784,13 @@ void SendspinClient::publish_client_state(SendspinConnection* conn) {
         client_state_for_roles(snapshot, entry->owned_roles & conn->get_active_role_mask());
     JsonDocument json = make_json_document(*this->json_arena_);
     build_client_state_message(&state_msg, json);
+#ifdef SENDSPIN_ENABLE_SOURCE
+    // The metadata text lives in the role's block, not in the trivially copyable snapshot.
+    if (state_msg.source.has_value() && this->source_) {
+        this->source_->impl_->append_state_metadata(json["payload"]["source"].as<JsonObject>(),
+                                                    conn->time_filter());
+    }
+#endif
     conn->send_json(json);
 }
 

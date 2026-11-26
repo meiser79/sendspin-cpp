@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "connection.h"
+#include "inline_text.h"
 #include "platform/json_arena.h"
 #include "platform/logging.h"
 #include "protocol_messages.h"
@@ -22,7 +23,9 @@
 #include "time_filter.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
+#include <cstring>
 #include <iterator>
 
 static const char* const TAG = "sendspin.source";
@@ -125,7 +128,17 @@ SourceRole::Impl::Impl(SourceRoleConfig config, SendspinClient* client)
     : config(config),
       client(client),
       task(std::make_unique<SourceTask>(this)),
-      config_valid(validate_config(config)) {}
+      config_valid(validate_config(config)) {
+    if (!config.metadata) {
+        return;
+    }
+    auto block = std::make_unique<SourceMetadataBlock>();
+    if (!block->text.allocate(SourceMetadataBlock::OFFSETS.back(), config.buffer_location)) {
+        SS_LOGE(TAG, "Failed to reserve the source metadata block; set_metadata() is refused");
+        return;
+    }
+    this->metadata = std::move(block);
+}
 
 SourceRole::Impl::~Impl() {
     // Joined first, while the role it reads its config and gate through is still whole
@@ -204,6 +217,14 @@ bool SourceRole::write_audio(const uint8_t* data, size_t len, int64_t capture_ti
 
 void SourceRole::set_signal(SourceSignal signal) {
     this->impl_->set_signal(signal);
+}
+
+bool SourceRole::set_metadata(const SourceMetadata& metadata) {
+    return this->impl_->set_metadata(metadata);
+}
+
+void SourceRole::clear_metadata() {
+    this->impl_->clear_metadata();
 }
 
 bool SourceRole::is_streaming() const {
@@ -398,6 +419,99 @@ void SourceRole::Impl::complete_teardown() {
 
 bool SourceRole::Impl::write_audio(const uint8_t* data, size_t len, int64_t capture_time_us) const {
     return this->task->write_audio(data, len, capture_time_us);
+}
+
+bool SourceRole::Impl::set_metadata(const SourceMetadata& report) {
+    if (!this->config.metadata) {
+        SS_LOGW(TAG, "set_metadata() ignored: metadata not configured");
+        return false;
+    }
+    if (!this->metadata) {
+        return false;
+    }
+    const std::array<const std::optional<std::string_view>*, SOURCE_METADATA_TEXT_FIELDS> fields{
+        &report.title, &report.artist, &report.album_artist, &report.album, &report.artwork_url};
+    for (const std::optional<std::string_view>* field : fields) {
+        if (field->has_value() && !is_valid_utf8(field->value())) {
+            SS_LOGW(TAG, "set_metadata() refused: a text field is not valid UTF-8");
+            return false;
+        }
+    }
+    if (report.track == 0) {
+        SS_LOGW(TAG, "set_metadata() refused: track must be at least 1");
+        return false;
+    }
+    {
+        SourceMetadataBlock& block = *this->metadata;
+        const std::lock_guard<std::mutex> lock(block.mutex);
+        for (size_t i = 0; i < SOURCE_METADATA_TEXT_FIELDS; ++i) {
+            const auto field = static_cast<SourceMetadataText>(i);
+            block.present[i] = fields[i]->has_value();
+            const std::string_view kept =
+                block.present[i]
+                    ? utf8_truncate(fields[i]->value(), SourceMetadataBlock::capacity(field))
+                    : std::string_view{};
+            std::memcpy(block.text.data() + SourceMetadataBlock::OFFSETS[i], kept.data(),
+                        kept.size());
+            block.sizes[i] = static_cast<uint16_t>(kept.size());
+        }
+        block.timestamp_us =
+            report.timestamp_us != 0 ? report.timestamp_us : SendspinClient::now_us();
+        block.progress = report.progress;
+        block.year = report.year;
+        block.track = report.track;
+        block.set = true;
+    }
+    this->client->publish_state();
+    return true;
+}
+
+void SourceRole::Impl::clear_metadata() {
+    if (!this->metadata) {
+        return;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(this->metadata->mutex);
+        if (!this->metadata->set) {
+            return;
+        }
+        this->metadata->set = false;
+    }
+    this->client->publish_state();
+}
+
+void SourceRole::Impl::append_state_metadata(JsonObject source,
+                                             const SendspinTimeFilter& filter) const {
+    if (!this->metadata) {
+        return;
+    }
+    static constexpr std::array<const char*, SOURCE_METADATA_TEXT_FIELDS> KEYS{
+        "title", "artist", "album_artist", "album", "artwork_url"};
+    const SourceMetadataBlock& block = *this->metadata;
+    // ArduinoJson copies each string_view into the document, so nothing outlives the lock.
+    const std::lock_guard<std::mutex> lock(block.mutex);
+    if (!block.set) {
+        return;
+    }
+    JsonObject out = source["metadata"].to<JsonObject>();
+    out["timestamp"] = filter.compute_server_time(block.timestamp_us);
+    for (size_t i = 0; i < SOURCE_METADATA_TEXT_FIELDS; ++i) {
+        if (block.present[i]) {
+            out[KEYS[i]] = block.view(static_cast<SourceMetadataText>(i));
+        }
+    }
+    if (block.year.has_value()) {
+        out["year"] = block.year.value();
+    }
+    if (block.track.has_value()) {
+        out["track"] = block.track.value();
+    }
+    if (block.progress.has_value()) {
+        JsonObject progress = out["progress"].to<JsonObject>();
+        progress["track_progress"] = block.progress->track_progress_ms;
+        progress["track_duration"] = block.progress->track_duration_ms;
+        progress["playback_speed"] = block.progress->playback_speed;
+    }
 }
 
 void SourceRole::Impl::set_signal(SourceSignal new_signal) {

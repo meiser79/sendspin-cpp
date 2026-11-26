@@ -199,6 +199,19 @@ source.set_signal(SourceSignal::PRESENT);  // or ABSENT
 
 Detecting the signal is up to the application (a jack-detect pin, a link state, or a level meter on the input); call `set_signal()` on each change. The server decides what to do with it (roles/source/v1.md "Default streaming behavior").
 
+A role configured with `metadata` also reports what the input audio is, for a source that learns it from the device feeding it (a Bluetooth sender's track information, a cast receiver's media status). Main loop only; the text is copied before the call returns:
+
+```cpp
+SourceMetadata now_playing;
+now_playing.title = "Blue in Green";
+now_playing.artist = "Miles Davis";
+now_playing.progress = SourceMetadataProgress{.track_progress_ms = 1000, .track_duration_ms = 337000};
+source.set_metadata(now_playing);  // timestamp_us 0: measured now
+source.clear_metadata();           // nothing known any more
+```
+
+Call it when the track or the playback state changes, not to move the position on: the server extrapolates that from `progress` (roles/source/v1.md "Source metadata"). A text field over the spec's cap is cut at a UTF-8 boundary; a field that is not valid UTF-8, or a `track` of 0, refuses the whole report. The text block (about 3 KB) is reserved when the role is added, from `buffer_location`.
+
 `examples/source_client/` is a working reference: it captures the default PortAudio input device and feeds `write_audio()` from the capture callback with each buffer's capture time on the client's clock. With `-s` it also reports line sense from the input's level.
 
 ### Application-Specific Roles
@@ -1279,7 +1292,7 @@ Never call `loop()`, `start()` or `stop()` from a listener, role or provider cal
 
 `ControllerRole::send_command()` is callable from any thread.
 
-`SourceRole::write_audio()` is for exactly one capture thread; the library does not serialize concurrent writers. `SourceRole::set_signal()` and `is_streaming()` are main loop only.
+`SourceRole::write_audio()` is for exactly one capture thread; the library does not serialize concurrent writers. `SourceRole::set_signal()`, `set_metadata()`, `clear_metadata()` and `is_streaming()` are main loop only.
 
 `ArtworkRole::frame_done()` must be called from the main loop thread (typically from inside `on_image_display()`/`on_image_clear()` or when a cross-fade animation completes).
 
@@ -1593,6 +1606,7 @@ Configuration passed to `client.add_source()`. A value that breaks any rule belo
 | `opus_bitrate` | `uint32_t` | `128000` | Opus bitrate in bit/s, 500 to 512000; ignored for `PCM` and `FLAC` |
 | `opus_complexity` | `uint8_t` | `2` | Opus encoder complexity, at most 10; ignored for `PCM` and `FLAC` |
 | `line_sense` | `bool` | `false` | Advertise signal sensing; see `SourceRole::set_signal()` |
+| `metadata` | `bool` | `false` | Allow `SourceRole::set_metadata()`; reserves its text block when the role is added |
 | `buffer_location` | `MemoryLocation` | `PREFER_EXTERNAL` | Placement of the capture buffer, the chunk buffer and a `FLAC` or `OPUS` encoder's chunk scratch (ESP-IDF only) |
 | `priority` | `unsigned` | `3` | FreeRTOS priority for the source task, below the protocol and httpd tasks (ESP-IDF only) |
 | `psram_stack` | `bool` | `false` | Allocate the source task stack in PSRAM (ESP-IDF only) |

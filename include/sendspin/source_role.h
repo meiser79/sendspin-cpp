@@ -22,6 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 namespace sendspin {
 
@@ -35,6 +37,30 @@ class SendspinClient;
 enum class SourceSignal : uint8_t {
     PRESENT,  // Audio signal detected on the capture input
     ABSENT,   // No audio signal on the capture input
+};
+
+/// @brief Playback position of the input audio (roles/source/v1.md "client/state source object")
+struct SourceMetadataProgress {
+    uint32_t track_progress_ms{0};
+    uint32_t track_duration_ms{0};  ///< 0 for unknown or unlimited
+    uint32_t playback_speed{1000};  ///< Speed multiplier * 1000; 0 is paused
+};
+
+/// @brief What the input audio is, for SourceRole::set_metadata(). The text is copied before the
+/// call returns; each field longer than the spec's cap (255 bytes, 2048 for artwork_url) is cut
+/// at a UTF-8 boundary.
+struct SourceMetadata {
+    /// @brief Local-clock time (SendspinClient::now_us()) at which `progress` was measured, or 0
+    /// for the time of the call. Converted to the server clock when each client/state is sent.
+    int64_t timestamp_us{0};
+    std::optional<std::string_view> title{};
+    std::optional<std::string_view> artist{};
+    std::optional<std::string_view> album_artist{};
+    std::optional<std::string_view> album{};
+    std::optional<std::string_view> artwork_url{};
+    std::optional<uint16_t> year{};
+    std::optional<uint16_t> track{};  ///< At least 1
+    std::optional<SourceMetadataProgress> progress{};
 };
 
 /// @brief Listener for source role events. All methods fire on the main loop thread.
@@ -118,6 +144,18 @@ public:
     /// Main loop only. Meaningful only with SourceRoleConfig::line_sense set; ignored (with a
     /// warning) otherwise.
     void set_signal(SourceSignal signal);
+
+    /// @brief Reports what the input audio is, published to the server in client/state
+    ///
+    /// Main loop only. Needs SourceRoleConfig::metadata. Send it when the metadata or the playback
+    /// state changes, not to advance the position: the server extrapolates that from `progress`
+    /// (roles/source/v1.md "Source metadata").
+    /// @return false, changing nothing, without SourceRoleConfig::metadata, when its block could
+    ///         not be reserved, or when a text field is not valid UTF-8 or `track` is 0.
+    bool set_metadata(const SourceMetadata& metadata);
+
+    /// @brief Withdraws the metadata set_metadata() reported. Main loop only.
+    void clear_metadata();
 
     /// @brief Whether the input stream is open, as the started/stopped callbacks last reported.
     /// Main loop only.

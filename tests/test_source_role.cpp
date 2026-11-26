@@ -505,6 +505,132 @@ TEST(SourceConfigValidation, RejectsUnusableFormats) {
 // a usable role advertises itself with its line_sense hint, an unusable one not at all, and the
 // state object carries a signal only for a role that senses one. The hello and state objects are
 // built without a server, through SourceRole's impl_.
+/// The client/state source object's metadata, as the protocol task writes it for a connection
+/// whose filter has no measurement yet (an identity transform).
+static std::string state_metadata(const SourceRole& source) {
+    JsonDocument doc;
+    JsonObject object = doc["source"].to<JsonObject>();
+    const SendspinTimeFilter filter;
+    source.impl_->append_state_metadata(object, filter);
+    std::string out;
+    if (!object["metadata"].isNull()) {
+        serializeJson(object["metadata"], out);
+    }
+    return out;
+}
+
+// roles/source/v1.md "client/state source object": the metadata a source reports goes out in its
+// state object, every field as given, its timestamp the local one through the filter.
+TEST(SourceRoleMetadata, AReportIsWrittenIntoTheStateObject) {
+    SendspinClient client(SendspinClientConfig{});
+    SourceRoleConfig config;
+    config.metadata = true;
+    SourceRole& source = client.add_source(config);
+    EXPECT_EQ(state_metadata(source), "") << "nothing reported yet";
+
+    SourceMetadata report;
+    report.timestamp_us = 1234567;
+    report.title = "Blue in Green";
+    report.artist = "Miles Davis";
+    report.album = "Kind of Blue";
+    report.artwork_url = "http://example.test/kob.jpg";
+    report.year = 1959;
+    report.track = 3;
+    report.progress = SourceMetadataProgress{
+        .track_progress_ms = 1000, .track_duration_ms = 337000, .playback_speed = 1000};
+    ASSERT_TRUE(source.set_metadata(report));
+
+    EXPECT_EQ(state_metadata(source),
+              R"({"timestamp":1234567,"title":"Blue in Green","artist":"Miles Davis",)"
+              R"("album":"Kind of Blue","artwork_url":"http://example.test/kob.jpg",)"
+              R"("year":1959,"track":3,"progress":{"track_progress":1000,)"
+              R"("track_duration":337000,"playback_speed":1000}})");
+}
+
+// "Each client/state carries the full source object": a new report replaces every field of the
+// last, and a cleared one leaves no metadata in the object.
+TEST(SourceRoleMetadata, AReportReplacesTheLastAndClearWithdrawsIt) {
+    SendspinClient client(SendspinClientConfig{});
+    SourceRoleConfig config;
+    config.metadata = true;
+    SourceRole& source = client.add_source(config);
+
+    SourceMetadata first;
+    first.timestamp_us = 10;
+    first.title = "One";
+    first.album = "Album";
+    ASSERT_TRUE(source.set_metadata(first));
+    SourceMetadata second;
+    second.timestamp_us = 20;
+    second.artist = "Two";
+    ASSERT_TRUE(source.set_metadata(second));
+    EXPECT_EQ(state_metadata(source), R"({"timestamp":20,"artist":"Two"})");
+
+    source.clear_metadata();
+    EXPECT_EQ(state_metadata(source), "");
+}
+
+// A report with no timestamp is stamped when it is made.
+TEST(SourceRoleMetadata, AMissingTimestampIsTheTimeOfTheCall) {
+    SendspinClient client(SendspinClientConfig{});
+    SourceRoleConfig config;
+    config.metadata = true;
+    SourceRole& source = client.add_source(config);
+
+    const int64_t before = SendspinClient::now_us();
+    ASSERT_TRUE(source.set_metadata(SourceMetadata{.title = "Now"}));
+    const int64_t after = SendspinClient::now_us();
+
+    JsonDocument doc;
+    ASSERT_FALSE(deserializeJson(doc, state_metadata(source)));
+    const auto stamped = doc["timestamp"].as<int64_t>();
+    EXPECT_GE(stamped, before);
+    EXPECT_LE(stamped, after);
+}
+
+// "MUST be at most 255 bytes" and 2048 for artwork_url: a longer field is cut, never mid
+// character.
+TEST(SourceRoleMetadata, LongTextIsCutAtACharacterBoundary) {
+    SendspinClient client(SendspinClientConfig{});
+    SourceRoleConfig config;
+    config.metadata = true;
+    SourceRole& source = client.add_source(config);
+
+    // 254 ASCII bytes and a two-byte character straddling the cap.
+    const std::string title = std::string(254, 'a') + "\xC3\xA9" + "tail";
+    const std::string url = "http://x.test/" + std::string(3000, 'u');
+    ASSERT_TRUE(source.set_metadata(SourceMetadata{.title = title, .artwork_url = url}));
+
+    JsonDocument doc;
+    ASSERT_FALSE(deserializeJson(doc, state_metadata(source)));
+    EXPECT_EQ(doc["title"].as<std::string>(), std::string(254, 'a'));
+    EXPECT_EQ(doc["artwork_url"].as<std::string>().size(), 2048U);
+}
+
+// What the spec does not allow is refused whole, keeping the last report.
+TEST(SourceRoleMetadata, InvalidReportsAreRefusedAndKeepTheLast) {
+    SendspinClient client(SendspinClientConfig{});
+    SourceRoleConfig config;
+    config.metadata = true;
+    SourceRole& source = client.add_source(config);
+    ASSERT_TRUE(source.set_metadata(SourceMetadata{.timestamp_us = 5, .title = "Kept"}));
+
+    EXPECT_FALSE(source.set_metadata(SourceMetadata{.title = "bad \xFF byte"}));
+    EXPECT_FALSE(source.set_metadata(SourceMetadata{.title = "Zero", .track = 0}));
+    EXPECT_EQ(state_metadata(source), R"({"timestamp":5,"title":"Kept"})");
+}
+
+// Without SourceRoleConfig::metadata no block is reserved and a report is refused.
+TEST(SourceRoleMetadata, WithoutTheConfigFlagAReportIsRefused) {
+    SendspinClient client(SendspinClientConfig{});
+    SourceRole& source = client.add_source(SourceRoleConfig{});
+
+    EXPECT_EQ(source.impl_->metadata, nullptr);
+    EXPECT_FALSE(source.set_metadata(SourceMetadata{.title = "Nope"}));
+    source.clear_metadata();
+    EXPECT_EQ(state_metadata(source), "");
+}
+
 TEST(SourceRoleObjects, HelloAndStateFields) {
     SendspinClient client(SendspinClientConfig{});
     SourceRoleConfig config;

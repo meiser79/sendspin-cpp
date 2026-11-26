@@ -818,10 +818,13 @@ struct SourceRoleConfig {
     /// @brief Opus encoder complexity, at most MAX_OPUS_COMPLEXITY. Ignored (and not validated)
     /// for PCM and FLAC.
     uint8_t opus_complexity{DEFAULT_OPUS_COMPLEXITY};
-    uint8_t channels{2};      ///< Capture channel count; must be > 0 (at most 8 for FLAC, 1 or 2
-                              ///< for OPUS)
-    uint8_t bit_depth{16};    ///< Bits per sample: 16, 24 (3 packed bytes), or 32 (16 for OPUS)
-    bool line_sense{false};   ///< Advertise signal sensing (see SourceRole::set_signal())
+    uint8_t channels{2};     ///< Capture channel count; must be > 0 (at most 8 for FLAC, 1 or 2
+                             ///< for OPUS)
+    uint8_t bit_depth{16};   ///< Bits per sample: 16, 24 (3 packed bytes), or 32 (16 for OPUS)
+    bool line_sense{false};  ///< Advertise signal sensing (see SourceRole::set_signal())
+    /// @brief Allow SourceRole::set_metadata(): reserves its text block (about 3 KB, placed by
+    /// buffer_location) when the role is added
+    bool metadata{false};
     bool psram_stack{false};  ///< Allocate the source task stack in PSRAM (ESP-IDF only)
 };
 

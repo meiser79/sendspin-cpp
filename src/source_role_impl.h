@@ -18,14 +18,19 @@
 #pragma once
 
 #include "inbox.h"
+#include "platform/memory.h"
 #include "sendspin/source_role.h"
 #include "source_task.h"
 #include "teardown_tracker.h"
+#include <ArduinoJson.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string_view>
 
 namespace sendspin {
 
@@ -33,6 +38,7 @@ class ProtocolTask;
 class SendspinArenaAllocator;
 class SendspinClient;
 class SendspinConnection;
+class SendspinTimeFilter;
 enum class SourceCommand : uint8_t;
 struct ClientHelloMessage;
 struct ClientStateMessage;
@@ -41,6 +47,41 @@ struct ClientStateMessage;
 enum class SourceStreamEventType : uint8_t {
     STREAMING_STARTED,  // client-stream/start was sent; write_audio() accepts audio
     STREAMING_STOPPED,  // The stream closed; write_audio() rejects audio
+};
+
+/// @brief The text fields of a source metadata object, in their order in SourceMetadataBlock
+enum class SourceMetadataText : uint8_t { TITLE, ARTIST, ALBUM_ARTIST, ALBUM, ARTWORK_URL };
+inline constexpr size_t SOURCE_METADATA_TEXT_FIELDS = 5;
+
+/**
+ * @brief The latest set_metadata() report: its text in one block reserved when the role is added
+ * (SourceRoleConfig::metadata), and everything else inline. Written by the main loop and read by
+ * the protocol task each time it builds a client/state, under `mutex`, a leaf lock.
+ */
+struct SourceMetadataBlock {
+    /// @brief Byte offset of each text field in `text`, then the block's total size
+    static constexpr std::array<size_t, SOURCE_METADATA_TEXT_FIELDS + 1> OFFSETS{
+        0, 255, 510, 765, 1020, 1020 + 2048};
+
+    static constexpr size_t capacity(SourceMetadataText field) {
+        const auto i = static_cast<size_t>(field);
+        return OFFSETS[i + 1] - OFFSETS[i];
+    }
+
+    std::string_view view(SourceMetadataText field) const {
+        const auto i = static_cast<size_t>(field);
+        return {reinterpret_cast<const char*>(this->text.data()) + OFFSETS[i], this->sizes[i]};
+    }
+
+    PlatformBuffer text;
+    mutable std::mutex mutex;
+    int64_t timestamp_us{0};  ///< local clock
+    std::optional<SourceMetadataProgress> progress;
+    std::optional<uint16_t> year;
+    std::optional<uint16_t> track;
+    std::array<uint16_t, SOURCE_METADATA_TEXT_FIELDS> sizes{};
+    std::array<bool, SOURCE_METADATA_TEXT_FIELDS> present{};
+    bool set{false};  ///< whether there is a report at all
 };
 
 /**
@@ -71,6 +112,9 @@ struct SourceRole::Impl : RoleTeardown {
     void build_hello_fields(ClientHelloMessage& msg) const;
     /// @brief The client/state source object. Main loop, from build_client_state().
     void build_state_fields(ClientStateMessage& msg) const;
+    /// @brief Writes the latest metadata report into `source`, the client/state source object
+    /// being built for a connection, its timestamp converted through `filter`. Protocol task.
+    void append_state_metadata(JsonObject source, const SendspinTimeFilter& filter) const;
 
     // The protocol-task half. Protocol task; cleanup() also runs on the main loop in
     // SendspinClient::stop() once that task is joined.
@@ -113,6 +157,8 @@ struct SourceRole::Impl : RoleTeardown {
 
     bool write_audio(const uint8_t* data, size_t len, int64_t capture_time_us) const;
     void set_signal(SourceSignal new_signal);
+    bool set_metadata(const SourceMetadata& metadata);
+    void clear_metadata();
 
     // ========================================
     // Helpers
@@ -148,6 +194,8 @@ struct SourceRole::Impl : RoleTeardown {
     SendspinArenaAllocator* json_arena{nullptr};
     SourceRoleListener* listener{nullptr};
     std::unique_ptr<SourceTask> task;
+    /// Null without SourceRoleConfig::metadata, or when its text block could not be reserved.
+    std::unique_ptr<SourceMetadataBlock> metadata;
 
     // 64-bit fields
     /// Instance id of the connection a pending authorization is for; 0 for none. Protocol task,
