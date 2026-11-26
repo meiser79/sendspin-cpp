@@ -260,13 +260,14 @@ void SourceRole::Impl::build_hello_fields(ClientHelloMessage& msg) const {
     if (!this->config_valid) {
         return;
     }
+    // messaging.md "client/hello" defines no source@v1_support object for a client, so listing the
+    // role is all it advertises.
     msg.supported_roles.push_back(SendspinRole::SOURCE);
-    msg.source_v1_support = SourceSupportObject{.line_sense = this->config.line_sense};
 }
 
 void SourceRole::Impl::build_state_fields(ClientStateMessage& msg) const {
-    // roles/source/v1.md "client/state source object": present while the role is active, even
-    // empty; signal only once one has been reported
+    // roles/source/v1.md "client/state source object": present while the role is active, with
+    // the signal it requires
     msg.source = ClientSourceStateObject{.signal = this->signal};
 }
 
@@ -515,10 +516,6 @@ void SourceRole::Impl::append_state_metadata(JsonObject source,
 }
 
 void SourceRole::Impl::set_signal(SourceSignal new_signal) {
-    if (!this->config.line_sense) {
-        SS_LOGW(TAG, "set_signal() ignored: line_sense not configured");
-        return;
-    }
     this->signal = new_signal;
     this->client->publish_state();
 }

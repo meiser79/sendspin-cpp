@@ -1018,16 +1018,10 @@ inline std::optional<SourceCommand> source_command_from_string(std::string_view 
     return std::nullopt;
 }
 
-/// @brief Source capabilities advertised in client/hello (roles/source/v1.md "client/hello
-/// source@v1 support object")
-struct SourceSupportObject {
-    bool line_sense{false};
-};
-
 /// @brief Source state reported in client/state (roles/source/v1.md "client/state source
-/// object"). The object may be present and empty; signal only when line_sense was advertised.
+/// object"), whose signal is required
 struct ClientSourceStateObject {
-    std::optional<SourceSignal> signal{};
+    SourceSignal signal{SourceSignal::ABSENT};
 };
 
 // ============================================================================
@@ -1079,7 +1073,6 @@ struct ClientHelloMessage {
     InlineVector<SendspinRole, static_cast<size_t>(SendspinRole::COUNT)> supported_roles{};
     std::optional<PlayerSupportObject> player_v1_support{};
     std::optional<VisualizerSupportObject> visualizer_support{};
-    std::optional<SourceSupportObject> source_v1_support{};
     /// @brief The configured application-specific roles, listed after supported_roles; each
     /// support_json is start()'s re-serialized object, sent as is.
     std::span<const SendspinApplicationRole> application_roles{};

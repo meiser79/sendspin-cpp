@@ -1130,15 +1130,6 @@ void build_client_hello_message(const ClientHelloMessage* msg, JsonDocument& doc
             msg->visualizer_support.value().buffer_capacity;
     }
 
-    // messaging.md "client/hello" requires the object whenever source@v1 is listed; line_sense is
-    // emitted only when set (roles/source/v1.md "client/hello source@v1 support object").
-    if (msg->source_v1_support.has_value()) {
-        JsonObject source_json = root["payload"]["source@v1_support"].to<JsonObject>();
-        if (msg->source_v1_support.value().line_sense) {
-            source_json["features"]["line_sense"] = true;
-        }
-    }
-
     // messaging.md "client/hello": an application-specific role's support object is keyed
     // "<role>_support". start() replaced the text with ArduinoJson's own serialization of one
     // JSON object, so it is embedded without a second parse, and held the name to
@@ -1242,12 +1233,9 @@ void build_client_state_message(const ClientStateMessage* msg, JsonDocument& doc
         }
     }
 
-    // signal only when set.
+    // roles/source/v1.md "client/state source object": signal is required.
     if (msg->source.has_value()) {
-        JsonObject source_json = root["payload"]["source"].to<JsonObject>();
-        if (msg->source.value().signal.has_value()) {
-            source_json["signal"] = to_cstr(msg->source.value().signal.value());
-        }
+        root["payload"]["source"]["signal"] = to_cstr(msg->source.value().signal);
     }
 }
 
